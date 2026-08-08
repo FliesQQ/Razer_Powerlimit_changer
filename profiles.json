@@ -1,0 +1,68 @@
+{
+  "undervolt": {
+    "core_mv": -120.0,
+    "cache_mv": -95.0,
+    "ecache_mv": -80.0
+  },
+  "safe_profile_id": "quiet",
+  "gpu_tdp_measured": {
+    "low": 100.0,
+    "medium": 0.0,
+    "high": 175.0
+  },
+  "active_profile_id": "balanced",
+  "profiles": [
+    {
+      "id": "quiet",
+      "name": "静音",
+      "pl1_w": 55.0,
+      "pl2_w": 75.0,
+      "tau_s": 48.0,
+      "gpu_level": "low",
+      "fan_mode": "auto",
+      "fan_rpm": 2500,
+      "max_fan": false,
+      "afterburner_profile": null,
+      "hotkey": "ctrl+alt+1"
+    },
+    {
+      "id": "balanced",
+      "name": "均衡",
+      "pl1_w": 60.0,
+      "pl2_w": 80.0,
+      "tau_s": 48.0,
+      "gpu_level": "medium",
+      "fan_mode": "auto",
+      "fan_rpm": 3000,
+      "max_fan": false,
+      "afterburner_profile": null,
+      "hotkey": "ctrl+alt+2"
+    },
+    {
+      "id": "performance",
+      "name": "性能",
+      "pl1_w": 75.0,
+      "pl2_w": 95.0,
+      "tau_s": 48.0,
+      "gpu_level": "medium",
+      "fan_mode": "manual",
+      "fan_rpm": 4000,
+      "max_fan": false,
+      "afterburner_profile": null,
+      "hotkey": "ctrl+alt+3"
+    },
+    {
+      "id": "water",
+      "name": "水冷",
+      "pl1_w": 130.0,
+      "pl2_w": 150.0,
+      "tau_s": 48.0,
+      "gpu_level": "high",
+      "fan_mode": "max",
+      "fan_rpm": 5000,
+      "max_fan": true,
+      "afterburner_profile": null,
+      "hotkey": "ctrl+alt+4"
+    }
+  ]
+}

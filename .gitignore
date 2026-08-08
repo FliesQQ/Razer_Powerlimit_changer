@@ -1,0 +1,45 @@
+# Bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+.eggs/
+*.spec.bak
+Synapse.ico.bak
+
+# Test / temp artifacts
+smoke_test.py
+smoke_test_result.txt
+_t_*.py
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Runtime / local vendor scratch
+vendor/winring0/_runtime/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local secrets / machine-only (keep profiles.json in repo as defaults if desired)
+# Uncomment if you don't want local profile edits tracked:
+# profiles.json
