@@ -399,56 +399,66 @@ class OsdSettingsPanel(ttk.Frame):
         self._build(title)
 
     def _build(self, title: str) -> None:
+        self._title_lbl = None
         if title:
-            ttk.Label(self, text=title).pack(anchor=tk.W, pady=(0, 6))
+            self._title_lbl = ttk.Label(self, text=title)
+            self._title_lbl.pack(anchor=tk.W, pady=(0, 6))
         row0 = ttk.Frame(self)
         row0.pack(fill=tk.X)
-        ttk.Checkbutton(
+        self._chk_enabled = ttk.Checkbutton(
             row0, text="启用桌面 OSD", variable=self.enabled, command=self._emit
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(
+        )
+        self._chk_enabled.pack(side=tk.LEFT, padx=(0, 8))
+        self._chk_topmost = ttk.Checkbutton(
             row0, text="最前端显示", variable=self.topmost, command=self._emit
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(
+        )
+        self._chk_topmost.pack(side=tk.LEFT, padx=(0, 8))
+        self._chk_locked = ttk.Checkbutton(
             row0, text="锁定位置", variable=self.locked, command=self._emit
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(
+        )
+        self._chk_locked.pack(side=tk.LEFT, padx=(0, 8))
+        self._chk_show_labels = ttk.Checkbutton(
             row0, text="显示项目名称", variable=self.show_labels, command=self._emit
-        ).pack(side=tk.LEFT)
+        )
+        self._chk_show_labels.pack(side=tk.LEFT)
 
         row1 = ttk.Frame(self)
         row1.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(row1, text="字号").pack(side=tk.LEFT)
+        self._lbl_font = ttk.Label(row1, text="字号")
+        self._lbl_font.pack(side=tk.LEFT)
         ttk.Entry(row1, textvariable=self.font_size, width=5).pack(side=tk.LEFT, padx=4)
-        ttk.Label(row1, text="透明度 0.35-1").pack(side=tk.LEFT, padx=(10, 0))
+        self._lbl_alpha = ttk.Label(row1, text="透明度 0.35-1")
+        self._lbl_alpha.pack(side=tk.LEFT, padx=(10, 0))
         ttk.Entry(row1, textvariable=self.alpha, width=6).pack(side=tk.LEFT, padx=4)
-        ttk.Button(row1, text="应用外观", command=self._emit).pack(side=tk.LEFT, padx=8)
+        self._btn_apply_look = ttk.Button(row1, text="应用外观", command=self._emit)
+        self._btn_apply_look.pack(side=tk.LEFT, padx=8)
 
-        ttk.Label(
+        self._lbl_drag = ttk.Label(
             self,
             text="拖动 OSD 可改位置；右键菜单会显示「✓ 已锁定/未锁定」状态",
-        ).pack(anchor=tk.W, pady=(6, 0))
+        )
+        self._lbl_drag.pack(anchor=tk.W, pady=(6, 0))
 
-        items = ttk.LabelFrame(self, text="显示项", padding=6)
-        items.pack(fill=tk.X, pady=(8, 0))
-        row = ttk.Frame(items)
+        self._items_frame = ttk.LabelFrame(self, text="显示项", padding=6)
+        self._items_frame.pack(fill=tk.X, pady=(8, 0))
+        row = ttk.Frame(self._items_frame)
         row.pack(fill=tk.X)
         for i, (key, name) in enumerate(ITEM_DEFS):
             if i and i % 5 == 0:
-                row = ttk.Frame(items)
+                row = ttk.Frame(self._items_frame)
                 row.pack(fill=tk.X, pady=(2, 0))
             ttk.Checkbutton(
                 row, text=name, variable=self.item_vars[key], command=self._emit
             ).pack(side=tk.LEFT, padx=4)
 
-        colors = ttk.LabelFrame(self, text="颜色", padding=6)
-        colors.pack(fill=tk.X, pady=(8, 0))
-        crow = ttk.Frame(colors)
+        self._colors_frame = ttk.LabelFrame(self, text="颜色", padding=6)
+        self._colors_frame.pack(fill=tk.X, pady=(8, 0))
+        crow = ttk.Frame(self._colors_frame)
         crow.pack(fill=tk.X)
         color_btns = [("background", "背景")] + [(k, n) for k, n in ITEM_DEFS]
         for i, (key, name) in enumerate(color_btns):
             if i and i % 5 == 0:
-                crow = ttk.Frame(colors)
+                crow = ttk.Frame(self._colors_frame)
                 crow.pack(fill=tk.X, pady=(2, 0))
             ttk.Button(
                 crow,
@@ -456,6 +466,31 @@ class OsdSettingsPanel(ttk.Frame):
                 width=8,
                 command=lambda k=key: self._pick_color(k),
             ).pack(side=tk.LEFT, padx=2)
+
+    def apply_i18n(self) -> None:
+        from .i18n import t
+
+        if self._title_lbl is not None:
+            try:
+                self._title_lbl.configure(text=t("osd_title"))
+            except Exception:
+                pass
+        for w, key in (
+            (self._chk_enabled, "osd_enable"),
+            (self._chk_topmost, "osd_topmost"),
+            (self._chk_locked, "osd_lock"),
+            (self._chk_show_labels, "osd_show_names"),
+            (self._lbl_font, "osd_font"),
+            (self._lbl_alpha, "osd_alpha"),
+            (self._btn_apply_look, "osd_apply_look"),
+            (self._lbl_drag, "osd_drag_hint"),
+            (self._items_frame, "osd_items"),
+            (self._colors_frame, "osd_colors"),
+        ):
+            try:
+                w.configure(text=t(key))
+            except Exception:
+                pass
 
     def _pick_color(self, key: str) -> None:
         current = self.color_vars[key].get()

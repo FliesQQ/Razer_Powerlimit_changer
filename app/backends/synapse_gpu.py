@@ -1,4 +1,4 @@
-﻿"""Razer Blade Synapse-compatible GPU/fan control via HID feature reports."""
+"""Razer Blade Synapse-compatible GPU/fan control via HID feature reports."""
 
 from __future__ import annotations
 
@@ -315,27 +315,30 @@ class SynapseGpuBackend:
 
     def peek_boosts(self) -> tuple[str, str]:
         """UI-friendly readout; keep last good value on HID timeout."""
+        from app.i18n import format_ec_line, t
+
         try:
             cpu = self.get_cpu_boost()
-            hint = EC_CPU_BOOST_HINT.get(cpu, "")
             name = CPU_BOOST_NAMES.get(cpu, str(int(cpu)))
-            cpu_txt = f"{name} ({int(cpu)})" + (f"  {hint}" if hint else "")
+            cpu_txt = format_ec_line(name, int(cpu), stale=False, hint=True)
         except Exception:
             if self._last_cpu_boost is not None:
                 cpu = self._last_cpu_boost
                 name = CPU_BOOST_NAMES.get(cpu, str(int(cpu)))
-                cpu_txt = f"{name} ({int(cpu)})  (缓存)"
+                cpu_txt = format_ec_line(name, int(cpu), stale=True, hint=False)
             else:
-                cpu_txt = "读失败: 超时"
+                cpu_txt = t("read_fail_timeout")
         try:
             gpu = self.get_gpu_boost()
-            gpu_txt = f"{LEVEL_NAMES.get(gpu, str(int(gpu)))} ({int(gpu)})"
+            name = LEVEL_NAMES.get(gpu, str(int(gpu)))
+            gpu_txt = format_ec_line(name, int(gpu), stale=False, hint=False)
         except Exception:
             if self._last_gpu_boost is not None:
                 gpu = self._last_gpu_boost
-                gpu_txt = f"{LEVEL_NAMES.get(gpu, str(int(gpu)))} ({int(gpu)})  (缓存)"
+                name = LEVEL_NAMES.get(gpu, str(int(gpu)))
+                gpu_txt = format_ec_line(name, int(gpu), stale=True, hint=False)
             else:
-                gpu_txt = "读失败: 超时"
+                gpu_txt = t("read_fail_timeout")
         return cpu_txt, gpu_txt
 
     def preserve_cpu_boost(self, fn):

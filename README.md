@@ -1,8 +1,12 @@
 # BladePower — Razer Blade 16 功耗 / 风扇 / 降压快捷工具
 
+**中文** | [English](README.en.md)
+
 面向 **Razer Blade 16（RZ09-0483，i9-13950HX + RTX 4090 Laptop）** 的 Windows 管理工具：用 GUI、全局热键、托盘切换自定义性能档，并支持雷云同款 CPU/GPU 档位、可选自定义 PL1/PL2、软件风扇曲线、全局降压。
 
 > **需要管理员权限**（读写 CPU MSR / 加载 WinRing0）。请先小步验证功耗与温度，过高或过深降压可能导致过热或不稳定。
+
+界面语言：主页顶部 **界面语言 → 中文 / English**（写入 `profiles.json` 的 `settings.ui_language`）。
 
 ---
 
@@ -106,7 +110,7 @@ dist\BladePower_Release\
   BladePower.exe
   WinRing0x64.dll / WinRing0x64.sys   # 必须与 exe 同目录
   profiles.json                      # 已存在则不会被打包覆盖
-  README.md / 使用说明.txt
+  README.md / README.en.md / 使用说明.txt
 ```
 
 整夹拷贝即可使用；右键 **以管理员身份运行** `BladePower.exe`。

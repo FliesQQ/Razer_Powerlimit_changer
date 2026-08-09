@@ -63,6 +63,7 @@ if not exist "%OUT%\profiles.json" (
 )
 copy /Y "Synapse.ico" "%OUT%\Synapse.ico" >nul
 copy /Y "README.md" "%OUT%\README.md" >nul
+copy /Y "README.en.md" "%OUT%\README.en.md" >nul
 
 (
 echo BladePower 使用说明

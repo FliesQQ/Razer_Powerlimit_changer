@@ -40,11 +40,17 @@ class FanCurveChart(ttk.Frame):
 
         head = ttk.Frame(self)
         head.pack(fill=tk.X)
-        ttk.Label(head, text=title).pack(side=tk.LEFT)
-        ttk.Button(head, text="加点", width=6, command=self._add_point).pack(side=tk.RIGHT, padx=2)
-        ttk.Button(head, text="删点", width=6, command=self._del_point).pack(side=tk.RIGHT, padx=2)
+        self._title_lbl = ttk.Label(head, text=title)
+        self._title_lbl.pack(side=tk.LEFT)
+        self._btn_add = ttk.Button(head, text="加点", width=6, command=self._add_point)
+        self._btn_add.pack(side=tk.RIGHT, padx=2)
+        self._btn_del = ttk.Button(head, text="删点", width=6, command=self._del_point)
+        self._btn_del.pack(side=tk.RIGHT, padx=2)
 
-        self.canvas = tk.Canvas(self, width=width, height=height, bg="#1a1a1a", highlightthickness=1)
+        self.canvas = tk.Canvas(
+            self, width=width, height=height, bg="#121820", highlightthickness=1,
+            highlightbackground="#2c3645",
+        )
         self.canvas.pack(fill=tk.BOTH, expand=True, pady=(4, 2))
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
@@ -55,27 +61,51 @@ class FanCurveChart(ttk.Frame):
 
         tools = ttk.Frame(self)
         tools.pack(fill=tk.X, pady=(2, 0))
-        ttk.Label(tools, text="数值写入 RPM").pack(side=tk.LEFT)
+        self._rpm_lbl = ttk.Label(tools, text="数值写入 RPM")
+        self._rpm_lbl.pack(side=tk.LEFT)
         self.rpm_spin = ttk.Spinbox(
             tools, from_=RPM_MIN, to=RPM_MAX, increment=100, width=8
         )
         self.rpm_spin.delete(0, tk.END)
         self.rpm_spin.insert(0, "0")
         self.rpm_spin.pack(side=tk.LEFT, padx=4)
-        ttk.Button(tools, text="写到最低温点", width=12, command=self._write_first_rpm).pack(
-            side=tk.LEFT, padx=2
+        self._btn_first = ttk.Button(
+            tools, text="写到最低温点", width=12, command=self._write_first_rpm
         )
-        ttk.Button(tools, text="写到最高温点", width=12, command=self._write_last_rpm).pack(
-            side=tk.LEFT, padx=2
+        self._btn_first.pack(side=tk.LEFT, padx=2)
+        self._btn_last = ttk.Button(
+            tools, text="写到最高温点", width=12, command=self._write_last_rpm
         )
-        ttk.Button(tools, text="全部点设为此值", width=14, command=self._write_all_rpm).pack(
-            side=tk.LEFT, padx=2
+        self._btn_last.pack(side=tk.LEFT, padx=2)
+        self._btn_all = ttk.Button(
+            tools, text="全部点设为此值", width=14, command=self._write_all_rpm
         )
+        self._btn_all.pack(side=tk.LEFT, padx=2)
 
         self.var.trace_add("write", self._on_var_write)
         self._suppress_var = False
         self._load_from_var()
         self.redraw()
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+        try:
+            self._title_lbl.configure(text=title)
+        except Exception:
+            pass
+
+    def apply_i18n(self) -> None:
+        from app.i18n import t
+
+        try:
+            self._btn_add.configure(text=t("chart_add"))
+            self._btn_del.configure(text=t("chart_del"))
+            self._rpm_lbl.configure(text=t("chart_rpm_write"))
+            self._btn_first.configure(text=t("chart_write_first"))
+            self._btn_last.configure(text=t("chart_write_last"))
+            self._btn_all.configure(text=t("chart_write_all"))
+        except Exception:
+            pass
 
     def _load_from_var(self) -> None:
         try:
@@ -158,21 +188,31 @@ class FanCurveChart(ttk.Frame):
         return temp, rpm_i
 
     def redraw(self) -> None:
+        from app.i18n import t as _t
+
         c = self.canvas
         c.delete("all")
         l, t, r, b = self._plot_box()
-        # Grid
-        c.create_rectangle(l, t, r, b, outline="#555555")
+        # Grid — teal/slate palette
+        c.create_rectangle(l, t, r, b, outline="#2c3645")
         for temp in range(TEMP_MIN, TEMP_MAX + 1, 10):
             x, _ = self._to_canvas(temp, RPM_MIN)
-            c.create_line(x, t, x, b, fill="#2a2a2a")
-            c.create_text(x, b + 10, text=str(temp), fill="#888888", font=("Segoe UI", 8))
+            c.create_line(x, t, x, b, fill="#1e2633")
+            c.create_text(x, b + 10, text=str(temp), fill="#8b98a8", font=("Segoe UI", 8))
         for rpm in range(RPM_MIN, RPM_MAX + 1, 500):
             _, y = self._to_canvas(TEMP_MIN, rpm)
-            c.create_line(l, y, r, y, fill="#2a2a2a")
-            c.create_text(l - 4, y, text=str(rpm), fill="#888888", font=("Segoe UI", 8), anchor="e")
-        c.create_text((l + r) / 2, b + 22, text="温度 °C", fill="#aaaaaa", font=("Segoe UI", 8))
-        c.create_text(12, (t + b) / 2, text="RPM", fill="#aaaaaa", font=("Segoe UI", 8), angle=90)
+            c.create_line(l, y, r, y, fill="#1e2633")
+            c.create_text(
+                l - 4, y, text=str(rpm), fill="#8b98a8", font=("Segoe UI", 8), anchor="e"
+            )
+        c.create_text(
+            (l + r) / 2,
+            b + 22,
+            text=_t("chart_temp_axis"),
+            fill="#8b98a8",
+            font=("Segoe UI", 8),
+        )
+        c.create_text(12, (t + b) / 2, text="RPM", fill="#8b98a8", font=("Segoe UI", 8), angle=90)
 
         pts = sorted(self._points, key=lambda p: p[0])
         if len(pts) >= 2:
@@ -180,12 +220,12 @@ class FanCurveChart(ttk.Frame):
             for temp, rpm in pts:
                 x, y = self._to_canvas(temp, rpm)
                 coords.extend([x, y])
-            c.create_line(*coords, fill="#40D060", width=2, smooth=False)
+            c.create_line(*coords, fill="#1ec8a5", width=2, smooth=False)
         for i, (temp, rpm) in enumerate(pts):
             x, y = self._to_canvas(temp, rpm)
-            color = "#FFB000" if i == self._drag_idx else "#40A0FF"
-            c.create_oval(x - 6, y - 6, x + 6, y + 6, fill=color, outline="#ffffff", width=1)
-            c.create_text(x, y - 12, text=f"{temp}°/{rpm}", fill="#dddddd", font=("Segoe UI", 7))
+            color = "#e0b34d" if i == self._drag_idx else "#5eead4"
+            c.create_oval(x - 6, y - 6, x + 6, y + 6, fill=color, outline="#e6edf5", width=1)
+            c.create_text(x, y - 12, text=f"{temp}°/{rpm}", fill="#e6edf5", font=("Segoe UI", 7))
 
     def _hit_test(self, x: float, y: float) -> Optional[int]:
         best = None

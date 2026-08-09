@@ -73,15 +73,15 @@ def _main_run(args: argparse.Namespace) -> int:
     ring0 = WinRing0()
     rapl = None
     undervolt = None
-    init_msgs: list[str] = []
+    init_flags: dict = {}
 
     try:
         ring0.initialize()
         rapl = CpuRaplBackend(ring0)
         undervolt = CpuUndervoltBackend(ring0)
-        init_msgs.append("WinRing0/MSR 已就绪")
+        init_flags["winring0"] = ("ok", None)
     except Exception as exc:  # noqa: BLE001
-        init_msgs.append(f"WinRing0 不可用: {exc}")
+        init_flags["winring0"] = ("fail", exc)
 
     synapse = None
     try:
@@ -91,21 +91,21 @@ def _main_run(args: argparse.Namespace) -> int:
         synapse = SynapseGpuBackend(product_id=blade.product_id if blade else None)
         synapse.open()
         if blade:
-            init_msgs.append(f"Razer HID: {blade.name} ({blade.pid_hex})")
+            init_flags["razer"] = ("blade", f"{blade.name} ({blade.pid_hex})")
         else:
-            init_msgs.append("Razer GPU HID 已就绪")
+            init_flags["razer"] = ("ok", None)
     except Exception as exc:  # noqa: BLE001
-        init_msgs.append(f"Razer GPU HID 不可用: {exc}")
+        init_flags["razer"] = ("fail", exc)
         synapse = None
 
     afterburner = AfterburnerBackend()
     if afterburner.available:
-        init_msgs.append(f"Afterburner: {afterburner.exe}")
+        init_flags["ab"] = ("ok", afterburner.exe)
     else:
-        init_msgs.append("Afterburner 未检测到（可选）")
+        init_flags["ab"] = ("miss", None)
 
     probe = probe_gpu_power_write()
-    init_msgs.append(probe.message)
+    init_flags["probe"] = probe.message
 
     manager = ProfileManager(
         rapl=rapl,
@@ -114,15 +114,41 @@ def _main_run(args: argparse.Namespace) -> int:
         afterburner=afterburner,
     )
 
+    from app import i18n
+    from app.i18n import t as _t
+
+    i18n.init_from_settings(getattr(manager, "settings", {}) or {})
+
+    init_msgs: list[str] = []
+    wr = init_flags.get("winring0")
+    if wr and wr[0] == "ok":
+        init_msgs.append(_t("init_winring0_ok"))
+    elif wr:
+        init_msgs.append(_t("init_winring0_fail", exc=wr[1]))
+    rz = init_flags.get("razer")
+    if rz and rz[0] == "blade":
+        init_msgs.append(f"Razer HID: {rz[1]}")
+    elif rz and rz[0] == "ok":
+        init_msgs.append(_t("init_razer_ok"))
+    elif rz:
+        init_msgs.append(_t("init_razer_fail", exc=rz[1]))
+    ab = init_flags.get("ab")
+    if ab and ab[0] == "ok":
+        init_msgs.append(_t("init_ab_ok", exe=ab[1]))
+    elif ab:
+        init_msgs.append(_t("init_ab_miss"))
+    if init_flags.get("probe"):
+        init_msgs.append(str(init_flags["probe"]))
+
     # Startup: detect & persist Intel XTU (IET) path.
     try:
         xtu_info = manager.refresh_xtu_path()
         if xtu_info.get("xtu_found"):
-            init_msgs.append(f"XTU: {xtu_info.get('xtu_path')}")
+            init_msgs.append(_t("init_xtu_ok", path=xtu_info.get("xtu_path")))
         else:
-            init_msgs.append("XTU: 未检测到")
+            init_msgs.append(_t("init_xtu_miss"))
     except Exception as exc:  # noqa: BLE001
-        init_msgs.append(f"XTU 检测失败: {exc}")
+        init_msgs.append(_t("init_xtu_fail", exc=exc))
 
     monitor = MonitorBackend()
     temps = TempMonitor(ring0 if rapl is not None else None)
@@ -139,71 +165,82 @@ def _main_run(args: argparse.Namespace) -> int:
         pass
 
     _fan_cache = {
-        "text": "CPU风扇=-  GPU风扇=-",
-        "tick": 0,
         "z1": None,
         "z2": None,
-        "err": "",
-        "busy": False,
+        "err_kind": "",  # "" | "timeout" | "fail"
     }
     _ec_cache = {
-        "cpu": "读取中…",
-        "gpu": "读取中…",
-        "mode": "",
-        "err": "",
-        "busy": False,
+        "cpu_name": None,
+        "cpu_code": None,
+        "gpu_name": None,
+        "gpu_code": None,
+        "cpu_stale": False,
+        "gpu_stale": False,
+        "no_hid": False,
+        "cpu_err": "",
+        "gpu_err": "",
     }
     fan_ctrl: FanCurveController | None = None
     sensor_tray: SensorTrayService | None = None
     osd: PerformanceOsd | None = None
 
-    def _format_fan_text(z1, z2, err: str = "") -> str:
-        def _one(label: str, v) -> str:
-            return f"{label}={v} RPM" if v is not None else f"{label}=-"
-
-        base = f"{_one('CPU风扇', z1)}  {_one('GPU风扇', z2)}"
-        if err:
-            return f"{base}（{err}）"
-        return base
-
     def _hid_poll_worker() -> None:
         """Single background HID poller: fans + EC boost (avoids lock contention)."""
         import time as _time
+        from app.backends.synapse_gpu import CPU_BOOST_NAMES, LEVEL_NAMES
 
         while True:
             if synapse is None:
-                _ec_cache["cpu"] = "无 Razer HID"
-                _ec_cache["gpu"] = "无 Razer HID"
+                _ec_cache["no_hid"] = True
+                _ec_cache["cpu_name"] = None
+                _ec_cache["gpu_name"] = None
                 _time.sleep(5.0)
                 continue
-            # Fans
+            _ec_cache["no_hid"] = False
+            # Fans — store raw; format in status_provider for current language.
             try:
                 z1, z2 = synapse.get_fans_rpm()
                 _fan_cache["z1"] = int(z1)
                 _fan_cache["z2"] = int(z2)
-                _fan_cache["err"] = ""
-                _fan_cache["text"] = _format_fan_text(z1, z2)
+                _fan_cache["err_kind"] = ""
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc)
-                short = "读速超时" if "timeout" in msg.lower() or "超时" in msg else "读速失败"
-                _fan_cache["err"] = short
-                _fan_cache["text"] = _format_fan_text(
-                    _fan_cache.get("z1"), _fan_cache.get("z2"), short
+                _fan_cache["err_kind"] = (
+                    "timeout"
+                    if "timeout" in msg.lower() or "超时" in msg
+                    else "fail"
                 )
-            # EC CPU/GPU — keep last good on timeout
+            # EC CPU/GPU raw
             try:
-                cpu_txt, gpu_txt = synapse.peek_boosts()
-                _ec_cache["cpu"] = cpu_txt
-                _ec_cache["gpu"] = gpu_txt
+                cpu = synapse.get_cpu_boost()
+                _ec_cache["cpu_name"] = CPU_BOOST_NAMES.get(cpu, str(int(cpu)))
+                _ec_cache["cpu_code"] = int(cpu)
+                _ec_cache["cpu_stale"] = False
+                _ec_cache["cpu_err"] = ""
             except Exception as exc:  # noqa: BLE001
-                if not _ec_cache.get("cpu") or str(_ec_cache.get("cpu")).startswith("读"):
-                    _ec_cache["cpu"] = f"读失败: {exc}"[:80]
+                if synapse._last_cpu_boost is not None:
+                    cpu = synapse._last_cpu_boost
+                    _ec_cache["cpu_name"] = CPU_BOOST_NAMES.get(cpu, str(int(cpu)))
+                    _ec_cache["cpu_code"] = int(cpu)
+                    _ec_cache["cpu_stale"] = True
+                    _ec_cache["cpu_err"] = ""
                 else:
-                    _ec_cache["cpu"] = f"{_ec_cache['cpu']}  (缓存)"
-                if not _ec_cache.get("gpu") or str(_ec_cache.get("gpu")).startswith("读"):
-                    _ec_cache["gpu"] = f"读失败: {exc}"[:80]
-                elif "(缓存)" not in str(_ec_cache.get("gpu")):
-                    _ec_cache["gpu"] = f"{_ec_cache['gpu']}  (缓存)"
+                    _ec_cache["cpu_err"] = str(exc)[:60]
+            try:
+                gpu = synapse.get_gpu_boost()
+                _ec_cache["gpu_name"] = LEVEL_NAMES.get(gpu, str(int(gpu)))
+                _ec_cache["gpu_code"] = int(gpu)
+                _ec_cache["gpu_stale"] = False
+                _ec_cache["gpu_err"] = ""
+            except Exception as exc:  # noqa: BLE001
+                if synapse._last_gpu_boost is not None:
+                    gpu = synapse._last_gpu_boost
+                    _ec_cache["gpu_name"] = LEVEL_NAMES.get(gpu, str(int(gpu)))
+                    _ec_cache["gpu_code"] = int(gpu)
+                    _ec_cache["gpu_stale"] = True
+                    _ec_cache["gpu_err"] = ""
+                else:
+                    _ec_cache["gpu_err"] = str(exc)[:60]
             _time.sleep(6.0)
 
     import threading as _threading
@@ -211,10 +248,35 @@ def _main_run(args: argparse.Namespace) -> int:
     _threading.Thread(target=_hid_poll_worker, daemon=True, name="HidStatusPoll").start()
 
     def status_provider() -> dict:
+        from app.i18n import format_ec_line, format_fan_line, t as tt
+
         out = {}
-        # Put EC boost near the top so it is visible in the live panel.
-        out["EC_CPU"] = _ec_cache.get("cpu") or "-"
-        out["EC_GPU"] = _ec_cache.get("gpu") or "-"
+        if _ec_cache.get("no_hid"):
+            out["EC_CPU"] = tt("no_razer_hid")
+            out["EC_GPU"] = tt("no_razer_hid")
+        else:
+            if _ec_cache.get("cpu_name") is not None:
+                out["EC_CPU"] = format_ec_line(
+                    _ec_cache["cpu_name"],
+                    int(_ec_cache["cpu_code"]),
+                    stale=bool(_ec_cache.get("cpu_stale")),
+                    hint=True,
+                )
+            elif _ec_cache.get("cpu_err"):
+                out["EC_CPU"] = f"{tt('read_fail')}: {_ec_cache['cpu_err']}"
+            else:
+                out["EC_CPU"] = tt("reading")
+            if _ec_cache.get("gpu_name") is not None:
+                out["EC_GPU"] = format_ec_line(
+                    _ec_cache["gpu_name"],
+                    int(_ec_cache["gpu_code"]),
+                    stale=bool(_ec_cache.get("gpu_stale")),
+                    hint=False,
+                )
+            elif _ec_cache.get("gpu_err"):
+                out["EC_GPU"] = f"{tt('read_fail')}: {_ec_cache['gpu_err']}"
+            else:
+                out["EC_GPU"] = tt("reading")
         if rapl is not None:
             try:
                 pl = rapl.read()
@@ -225,28 +287,39 @@ def _main_run(args: argparse.Namespace) -> int:
                 elif rapl.last_package_power_w is not None:
                     out["CPU 功耗"] = f"{rapl.last_package_power_w} W (Package)"
             except Exception as exc:  # noqa: BLE001
-                out["CPU PL"] = f"读失败: {exc}"
+                out["CPU PL"] = f"{tt('read_fail')}: {exc}"
         if undervolt is not None:
             try:
                 uv = undervolt.read()
                 out["UV"] = f"{uv.core_mv}/{uv.cache_mv}/{uv.ecache_mv} mV"
                 if getattr(undervolt, "last_locked", False):
-                    out["UV提示"] = "固件可能锁定降压"
+                    out["UV提示"] = tt("uv_fw_locked")
             except Exception as exc:  # noqa: BLE001
-                out["UV"] = f"读失败: {exc}"
+                out["UV"] = f"{tt('read_fail')}: {exc}"
         try:
-            t = temps.read()
-            src = {"package": "Package", "core": "Core", "wmi": "ACPI"}.get(t.cpu_source, "")
-            cpu_txt = f"{t.cpu_c}°C" if t.cpu_c is not None else "-"
-            if src and t.cpu_c is not None:
-                cpu_txt = f"{t.cpu_c}°C({src})"
-            out["温度"] = f"CPU={cpu_txt}  GPU={t.gpu_c if t.gpu_c is not None else '-'}°C"
+            tr = temps.read()
+            src = {"package": "Package", "core": "Core", "wmi": "ACPI"}.get(
+                tr.cpu_source, ""
+            )
+            cpu_txt = f"{tr.cpu_c}°C" if tr.cpu_c is not None else "-"
+            if src and tr.cpu_c is not None:
+                cpu_txt = f"{tr.cpu_c}°C({src})"
+            out["温度"] = (
+                f"CPU={cpu_txt}  GPU={tr.gpu_c if tr.gpu_c is not None else '-'}°C"
+            )
         except Exception as exc:  # noqa: BLE001
-            out["温度"] = f"读失败: {exc}"
+            out["温度"] = f"{tt('read_fail')}: {exc}"
         if fan_ctrl is not None and getattr(manager.fan_curve_cfg, "enabled", False):
             out["风扇曲线"] = fan_ctrl.last_status
-        # Fan RPM comes from background poller (avoids HID timeout on UI thread).
-        out["风扇"] = _fan_cache.get("text") or "CPU风扇=-  GPU风扇=-"
+        err_kind = _fan_cache.get("err_kind") or ""
+        err = (
+            tt("rpm_timeout")
+            if err_kind == "timeout"
+            else (tt("rpm_fail") if err_kind == "fail" else "")
+        )
+        out["风扇"] = format_fan_line(
+            _fan_cache.get("z1"), _fan_cache.get("z2"), err
+        )
         return out
 
     def reassert_pl() -> None:
@@ -387,7 +460,7 @@ def _main_run(args: argparse.Namespace) -> int:
         mapping["ctrl+alt+0"] = lambda: on_hotkey_restore()
         failed = hotkeys.register_map(mapping)
         if failed:
-            gui._set_status(f"部分热键注册失败: {', '.join(failed)}")
+            gui._set_status(_t("hotkey_fail", keys=", ".join(failed)))
 
     def on_hotkey_profile(profile_id: str) -> None:
         def work():
@@ -492,7 +565,7 @@ def _main_run(args: argparse.Namespace) -> int:
             gui.set_autostart_enabled(autostart.is_enabled())
         except Exception:
             pass
-        gui._set_status(msg if ok else f"开机自启失败: {msg}")
+        gui._set_status(msg if ok else _t("autostart_fail_msg", msg=msg))
 
     gui.on_autostart_changed = set_autostart
     try:
@@ -513,12 +586,12 @@ def _main_run(args: argparse.Namespace) -> int:
                 pid = manager.active_profile_id
                 if pid and manager.get(pid) is not None:
                     result = manager.apply_by_id(pid)
-                    text = "启动已应用: " + " | ".join(result.messages)[:160]
+                    text = _t("startup_applied", msg=" | ".join(result.messages)[:160])
                 else:
                     result = manager.reapply_undervolt()
-                    text = "启动已重申降压: " + " | ".join(result.messages)[:160]
+                    text = _t("startup_uv", msg=" | ".join(result.messages)[:160])
             except Exception as exc:  # noqa: BLE001
-                text = f"启动应用失败: {exc}"
+                text = _t("startup_fail", exc=exc)
             root.after(0, lambda: gui._set_status(text[:200]))
 
         import threading
@@ -600,8 +673,8 @@ def _main_run(args: argparse.Namespace) -> int:
             return
         ok = sensor_tray.set_visible(enabled)
         gui._set_status(
-            ("传感器托盘已显示" if enabled else "传感器托盘已隐藏")
-            + ("" if ok else "（切换失败）")
+            (_t("sensor_tray_on") if enabled else _t("sensor_tray_off"))
+            + ("" if ok else _t("sensor_tray_fail_tag"))
         )
 
     def toggle_sensor_tray() -> None:
