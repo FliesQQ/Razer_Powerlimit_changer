@@ -49,6 +49,19 @@ def main(argv: list[str] | None = None) -> int:
         print("需要管理员权限才能改 CPU MSR / 部分硬件设置。")
         return 1
 
+    from app.single_instance import ensure_single_instance, release as release_single_instance
+
+    # After elevation — only one elevated instance may continue.
+    if not ensure_single_instance(show_message=not args.minimized):
+        return 0
+
+    try:
+        return _main_run(args)
+    finally:
+        release_single_instance()
+
+
+def _main_run(args: argparse.Namespace) -> int:
     # Startup dependency / compatibility gate.
     # Autostart (--minimized) must not block login with a dialog.
     if not args.minimized and not args.skip_preflight:
@@ -125,14 +138,83 @@ def main(argv: list[str] | None = None) -> int:
     except Exception:
         pass
 
-    _fan_cache = {"text": "未读取", "tick": 0, "z1": None, "z2": None}
+    _fan_cache = {
+        "text": "CPU风扇=-  GPU风扇=-",
+        "tick": 0,
+        "z1": None,
+        "z2": None,
+        "err": "",
+        "busy": False,
+    }
+    _ec_cache = {
+        "cpu": "读取中…",
+        "gpu": "读取中…",
+        "mode": "",
+        "err": "",
+        "busy": False,
+    }
     fan_ctrl: FanCurveController | None = None
     sensor_tray: SensorTrayService | None = None
     osd: PerformanceOsd | None = None
-    osd: PerformanceOsd | None = None
+
+    def _format_fan_text(z1, z2, err: str = "") -> str:
+        def _one(label: str, v) -> str:
+            return f"{label}={v} RPM" if v is not None else f"{label}=-"
+
+        base = f"{_one('CPU风扇', z1)}  {_one('GPU风扇', z2)}"
+        if err:
+            return f"{base}（{err}）"
+        return base
+
+    def _hid_poll_worker() -> None:
+        """Single background HID poller: fans + EC boost (avoids lock contention)."""
+        import time as _time
+
+        while True:
+            if synapse is None:
+                _ec_cache["cpu"] = "无 Razer HID"
+                _ec_cache["gpu"] = "无 Razer HID"
+                _time.sleep(5.0)
+                continue
+            # Fans
+            try:
+                z1, z2 = synapse.get_fans_rpm()
+                _fan_cache["z1"] = int(z1)
+                _fan_cache["z2"] = int(z2)
+                _fan_cache["err"] = ""
+                _fan_cache["text"] = _format_fan_text(z1, z2)
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc)
+                short = "读速超时" if "timeout" in msg.lower() or "超时" in msg else "读速失败"
+                _fan_cache["err"] = short
+                _fan_cache["text"] = _format_fan_text(
+                    _fan_cache.get("z1"), _fan_cache.get("z2"), short
+                )
+            # EC CPU/GPU — keep last good on timeout
+            try:
+                cpu_txt, gpu_txt = synapse.peek_boosts()
+                _ec_cache["cpu"] = cpu_txt
+                _ec_cache["gpu"] = gpu_txt
+            except Exception as exc:  # noqa: BLE001
+                if not _ec_cache.get("cpu") or str(_ec_cache.get("cpu")).startswith("读"):
+                    _ec_cache["cpu"] = f"读失败: {exc}"[:80]
+                else:
+                    _ec_cache["cpu"] = f"{_ec_cache['cpu']}  (缓存)"
+                if not _ec_cache.get("gpu") or str(_ec_cache.get("gpu")).startswith("读"):
+                    _ec_cache["gpu"] = f"读失败: {exc}"[:80]
+                elif "(缓存)" not in str(_ec_cache.get("gpu")):
+                    _ec_cache["gpu"] = f"{_ec_cache['gpu']}  (缓存)"
+            _time.sleep(6.0)
+
+    import threading as _threading
+
+    _threading.Thread(target=_hid_poll_worker, daemon=True, name="HidStatusPoll").start()
 
     def status_provider() -> dict:
         out = {}
+        # Put EC boost near the top so it is visible in the live panel.
+        out["EC_CPU"] = _ec_cache.get("cpu") or "-"
+        out["EC_GPU"] = _ec_cache.get("gpu") or "-"
         if rapl is not None:
             try:
                 pl = rapl.read()
@@ -163,25 +245,47 @@ def main(argv: list[str] | None = None) -> int:
             out["温度"] = f"读失败: {exc}"
         if fan_ctrl is not None and getattr(manager.fan_curve_cfg, "enabled", False):
             out["风扇曲线"] = fan_ctrl.last_status
-        # Fan HID reads wake Synapse — refresh sparsely.
-        _fan_cache["tick"] += 1
-        if synapse is not None and _fan_cache["tick"] % 4 == 1:
-            try:
-                z1, z2 = synapse.get_fans_rpm()
-                _fan_cache["z1"] = int(z1)
-                _fan_cache["z2"] = int(z2)
-                _fan_cache["text"] = f"Z1={z1} RPM  Z2={z2} RPM"
-            except Exception as exc:  # noqa: BLE001
-                _fan_cache["text"] = f"读失败: {exc}"
-        out["风扇"] = _fan_cache["text"]
+        # Fan RPM comes from background poller (avoids HID timeout on UI thread).
+        out["风扇"] = _fan_cache.get("text") or "CPU风扇=-  GPU风扇=-"
         return out
 
     def reassert_pl() -> None:
-        if rapl is not None and rapl.last_target is not None:
-            try:
-                rapl.reassert()
-            except Exception:
-                pass
+        try:
+            pid = manager.active_profile_id
+            p = manager.get(pid) if pid else None
+            if p is None:
+                root.after(5000, reassert_pl)
+                return
+            cpu_name = str(getattr(p, "cpu_level", "boost") or "boost").lower()
+            is_custom = cpu_name == "custom"
+            if manager.feature_enabled("enable_cpu_level") and is_custom:
+                if rapl is not None and rapl.last_target is not None:
+                    try:
+                        want = rapl.last_target
+                        got = rapl.read()
+                        if (
+                            abs(got.pl1_w - want[0]) > 3.0
+                            or abs(got.pl2_w - want[1]) > 5.0
+                        ):
+                            rapl.reassert()
+                    except Exception:
+                        pass
+                if synapse is not None:
+                    try:
+                        from app.backends.synapse_gpu import CpuBoost
+
+                        synapse.set_cpu_boost(CpuBoost.BOOST)
+                    except Exception:
+                        pass
+            elif manager.feature_enabled("enable_cpu_level") and synapse is not None:
+                try:
+                    from app.backends.synapse_gpu import NAME_TO_CPU_BOOST, CpuBoost
+
+                    synapse.set_cpu_boost(NAME_TO_CPU_BOOST.get(cpu_name, CpuBoost.BOOST))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         root.after(5000, reassert_pl)
 
     def reapply_after_resume(*, reason: str = "休眠唤醒", full: bool = False) -> None:
@@ -189,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
 
         def work() -> None:
             msgs: list[str] = []
-            if undervolt is not None:
+            if undervolt is not None and manager.feature_enabled("enable_undervolt"):
                 try:
                     from app.backends.cpu_undervolt import UndervoltSettings
 
@@ -250,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     def uv_watchdog() -> None:
         """若目标降压非零但读回接近 0，则补写（捕获漏报的唤醒）。"""
         try:
-            if undervolt is not None:
+            if undervolt is not None and manager.feature_enabled("enable_undervolt"):
                 want = manager.undervolt_cfg
                 wanted = any(
                     abs(v) > 0.5 for v in (want.core_mv, want.cache_mv, want.ecache_mv)
@@ -313,13 +417,58 @@ def main(argv: list[str] | None = None) -> int:
         threading.Thread(target=work, daemon=True).start()
 
     def on_fan_curves_changed() -> None:
-        if fan_ctrl is None:
-            return
-        if manager.fan_curve_cfg and manager.fan_curve_cfg.enabled:
-            fan_ctrl.force_tick()
-            gui._set_status(fan_ctrl.last_status)
-        else:
-            gui._set_status("风扇曲线已关闭（恢复档位风扇设置需重新应用档位）")
+        """Software curve ↔ profile fan mode are mutually exclusive."""
+        cfg = manager.fan_curve_cfg
+        enabled = bool(cfg and cfg.enabled)
+
+        def work() -> None:
+            try:
+                if enabled:
+                    if fan_ctrl is not None:
+                        # Force EC rewrite even if RPM unchanged.
+                        fan_ctrl._last_cpu_rpm = None
+                        fan_ctrl._last_gpu_rpm = None
+                        fan_ctrl.force_tick()
+                        text = "软件风扇曲线已启用（档位风扇已让出）| " + fan_ctrl.last_status
+                    else:
+                        text = "软件风扇曲线已启用"
+                else:
+                    pid = manager.active_profile_id
+                    profile = manager.get(pid) if pid else None
+                    if profile is not None:
+                        result = manager.apply_by_id(pid)
+                        text = "已关闭软件曲线，已恢复档位风扇 | " + " | ".join(
+                            result.messages
+                        )
+                    elif synapse is not None:
+                        synapse.apply_fan("auto")
+                        text = "已关闭软件曲线，风扇已回自动（无活动档位）"
+                    else:
+                        text = "已关闭软件曲线（无风扇后端可恢复）"
+            except Exception as exc:  # noqa: BLE001
+                text = f"风扇模式切换失败: {exc}"
+            root.after(0, lambda t=text: gui._set_status(t[:220]))
+
+        import threading
+
+        threading.Thread(target=work, daemon=True, name="FanModeSwitch").start()
+
+    def on_fan_curves_force_write() -> None:
+        """One-shot: push current curve points to EC (even if toggle is off)."""
+
+        def work() -> None:
+            try:
+                if fan_ctrl is None:
+                    text = "强制写入失败: 风扇曲线控制器未就绪"
+                else:
+                    text = "已强制写入 | " + fan_ctrl.force_apply_now()
+            except Exception as exc:  # noqa: BLE001
+                text = f"强制写入失败: {exc}"
+            root.after(0, lambda t=text: gui._set_status(t[:220]))
+
+        import threading
+
+        threading.Thread(target=work, daemon=True, name="FanForceWrite").start()
 
     gui = AppGUI(
         root,
@@ -329,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
         status_provider=status_provider,
     )
     gui.on_fan_curves_changed = on_fan_curves_changed
+    gui.on_fan_curves_force_write = on_fan_curves_force_write
     xtu_path = (manager.settings or {}).get("xtu_path") or ""
     gui.set_xtu_path_label(xtu_path, bool((manager.settings or {}).get("xtu_found")))
     gui._set_status(" | ".join(init_msgs)[:220])

@@ -1,8 +1,8 @@
 {
   "undervolt": {
-    "core_mv": -120.0,
-    "cache_mv": -95.0,
-    "ecache_mv": -80.0
+    "core_mv": -115.0,
+    "cache_mv": -90.0,
+    "ecache_mv": -75.0
   },
   "safe_profile_id": "quiet",
   "gpu_tdp_measured": {
@@ -11,6 +11,143 @@
     "high": 175.0
   },
   "active_profile_id": "balanced",
+  "settings": {
+    "skip_preflight": true,
+    "xtu_path": "C:\\Program Files\\Intel\\Intel(R) Extreme Tuning Utility",
+    "xtu_found": true,
+    "xtu_detected_at": "2026-08-08T18:14:26+00:00",
+    "xtu_source": "cached",
+    "sensor_tray_order": [
+      "cpu_pwr",
+      "cpu_tmp",
+      "gpu_pwr",
+      "gpu_tmp"
+    ],
+    "osd": {
+      "enabled": false,
+      "topmost": true,
+      "locked": true,
+      "x": 1712,
+      "y": 2,
+      "font_size": 14,
+      "alpha": 0.88,
+      "show_labels": true,
+      "items": {
+        "cpu_power": true,
+        "cpu_temp": true,
+        "gpu_power": true,
+        "gpu_temp": true,
+        "fan_z1": false,
+        "fan_z2": false,
+        "cpu_pl": false,
+        "uv": false,
+        "profile": false
+      },
+      "colors": {
+        "cpu_power": "#FFB000",
+        "cpu_temp": "#FF5555",
+        "gpu_power": "#40D060",
+        "gpu_temp": "#40A0FF",
+        "fan_z1": "#66DDEE",
+        "fan_z2": "#66BBEE",
+        "cpu_pl": "#E0E0E0",
+        "uv": "#C080FF",
+        "profile": "#FFFFFF",
+        "label": "#AAAAAA",
+        "background": "#101010"
+      }
+    },
+    "sensor_tray_enabled": false,
+    "autostart_enabled": true
+  },
+  "fan_curves": {
+    "enabled": true,
+    "cpu": [
+      [
+        40,
+        0
+      ],
+      [
+        45,
+        0
+      ],
+      [
+        50,
+        0
+      ],
+      [
+        55,
+        0
+      ],
+      [
+        60,
+        2000
+      ],
+      [
+        70,
+        3000
+      ],
+      [
+        75,
+        4000
+      ],
+      [
+        80,
+        4500
+      ],
+      [
+        85,
+        5000
+      ],
+      [
+        90,
+        5500
+      ]
+    ],
+    "gpu": [
+      [
+        40,
+        0
+      ],
+      [
+        45,
+        0
+      ],
+      [
+        50,
+        0
+      ],
+      [
+        55,
+        0
+      ],
+      [
+        60,
+        2000
+      ],
+      [
+        70,
+        3500
+      ],
+      [
+        75,
+        4000
+      ],
+      [
+        80,
+        4500
+      ],
+      [
+        85,
+        5500
+      ],
+      [
+        98,
+        0
+      ]
+    ],
+    "interval_s": 2.0
+  },
   "profiles": [
     {
       "id": "quiet",
@@ -22,8 +159,8 @@
       "fan_mode": "auto",
       "fan_rpm": 2500,
       "max_fan": false,
-      "afterburner_profile": null,
-      "hotkey": "ctrl+alt+1"
+      "afterburner_profile": 1,
+      "hotkey": "ctrl+shift+f1"
     },
     {
       "id": "balanced",
@@ -35,8 +172,8 @@
       "fan_mode": "auto",
       "fan_rpm": 3000,
       "max_fan": false,
-      "afterburner_profile": null,
-      "hotkey": "ctrl+alt+2"
+      "afterburner_profile": 1,
+      "hotkey": "ctrl+shift+f2"
     },
     {
       "id": "performance",
@@ -48,8 +185,8 @@
       "fan_mode": "manual",
       "fan_rpm": 4000,
       "max_fan": false,
-      "afterburner_profile": null,
-      "hotkey": "ctrl+alt+3"
+      "afterburner_profile": 1,
+      "hotkey": "ctrl+shift+f3"
     },
     {
       "id": "water",
@@ -58,11 +195,11 @@
       "pl2_w": 150.0,
       "tau_s": 48.0,
       "gpu_level": "high",
-      "fan_mode": "max",
+      "fan_mode": "auto",
       "fan_rpm": 5000,
-      "max_fan": true,
-      "afterburner_profile": null,
-      "hotkey": "ctrl+alt+4"
+      "max_fan": false,
+      "afterburner_profile": 1,
+      "hotkey": "ctrl+shift+f4"
     }
   ]
 }

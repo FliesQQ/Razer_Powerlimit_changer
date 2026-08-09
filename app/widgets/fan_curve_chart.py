@@ -52,6 +52,26 @@ class FanCurveChart(ttk.Frame):
         self.canvas.bind("<Configure>", lambda _e: self.redraw())
 
         ttk.Entry(self, textvariable=self.var).pack(fill=tk.X, pady=(2, 0))
+
+        tools = ttk.Frame(self)
+        tools.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(tools, text="数值写入 RPM").pack(side=tk.LEFT)
+        self.rpm_spin = ttk.Spinbox(
+            tools, from_=RPM_MIN, to=RPM_MAX, increment=100, width=8
+        )
+        self.rpm_spin.delete(0, tk.END)
+        self.rpm_spin.insert(0, "0")
+        self.rpm_spin.pack(side=tk.LEFT, padx=4)
+        ttk.Button(tools, text="写到最低温点", width=12, command=self._write_first_rpm).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(tools, text="写到最高温点", width=12, command=self._write_last_rpm).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Button(tools, text="全部点设为此值", width=14, command=self._write_all_rpm).pack(
+            side=tk.LEFT, padx=2
+        )
+
         self.var.trace_add("write", self._on_var_write)
         self._suppress_var = False
         self._load_from_var()
@@ -128,8 +148,14 @@ class FanCurveChart(ttk.Frame):
         temp = TEMP_MIN + (x - l) / (r - l) * (TEMP_MAX - TEMP_MIN)
         rpm = RPM_MIN + (b - y) / (b - t) * (RPM_MAX - RPM_MIN)
         temp = int(round(max(TEMP_MIN, min(TEMP_MAX, temp))))
-        rpm = int(round(max(RPM_MIN, min(RPM_MAX, rpm)) / 100.0) * 100)
-        return temp, rpm
+        rpm = float(max(RPM_MIN, min(RPM_MAX, rpm)))
+        # Sticky snap to 0 near the bottom (EC auto-stop target).
+        if rpm <= 150:
+            rpm_i = 0
+        else:
+            rpm_i = int(round(rpm / 100.0) * 100)
+            rpm_i = max(RPM_MIN, min(RPM_MAX, rpm_i))
+        return temp, rpm_i
 
     def redraw(self) -> None:
         c = self.canvas
@@ -233,6 +259,58 @@ class FanCurveChart(ttk.Frame):
         if len(self._points) <= 2:
             return
         self._points.pop()
+        self._points = normalize_points(self._points)
+        self._emit_var()
+        self.redraw()
+
+    def _read_spin_rpm(self) -> int:
+        try:
+            rpm = int(float(self.rpm_spin.get()))
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("RPM 无效") from exc
+        rpm = max(RPM_MIN, min(RPM_MAX, rpm))
+        # Keep EC 100-RPM steps, but allow exact 0.
+        if rpm <= 0:
+            return 0
+        return int(round(rpm / 100.0) * 100)
+
+    def _write_first_rpm(self) -> None:
+        try:
+            rpm = self._read_spin_rpm()
+        except ValueError:
+            return
+        if not self._points:
+            self._points = [(40, rpm), (90, max(rpm, 3000))]
+        else:
+            t0, _ = self._points[0]
+            self._points[0] = (t0, rpm)
+        self._points = normalize_points(self._points)
+        self._emit_var()
+        self.redraw()
+
+    def _write_last_rpm(self) -> None:
+        try:
+            rpm = self._read_spin_rpm()
+        except ValueError:
+            return
+        if not self._points:
+            self._points = [(40, 0), (90, rpm)]
+        else:
+            t1, _ = self._points[-1]
+            self._points[-1] = (t1, rpm)
+        self._points = normalize_points(self._points)
+        self._emit_var()
+        self.redraw()
+
+    def _write_all_rpm(self) -> None:
+        try:
+            rpm = self._read_spin_rpm()
+        except ValueError:
+            return
+        if not self._points:
+            self._points = [(40, rpm), (90, rpm)]
+        else:
+            self._points = [(t, rpm) for t, _r in self._points]
         self._points = normalize_points(self._points)
         self._emit_var()
         self.redraw()

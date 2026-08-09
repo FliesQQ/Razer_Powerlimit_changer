@@ -10,6 +10,28 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 
+DEFAULT_FEATURE_FLAGS = {
+    # Synapse-like EC CPU tier (+ custom → PL1/PL2). Voltage is separate.
+    "enable_cpu_level": True,
+    "enable_gpu_level": True,
+    "enable_undervolt": True,
+    # Legacy keys kept for older configs (ignored for apply logic).
+    "enable_cpu_tdp": False,
+    "pin_ec_cpu_boost": True,
+    "pinned_ec_cpu_boost": "boost",
+}
+
+VALID_CPU_LEVELS = frozenset({"low", "medium", "high", "boost", "custom", "overclock"})
+
+
+def _merge_feature_defaults(settings: dict[str, Any]) -> dict[str, Any]:
+    out = dict(settings or {})
+    for k, v in DEFAULT_FEATURE_FLAGS.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
 DEFAULT_PROFILES = [
     {
         "id": "quiet",
@@ -17,6 +39,7 @@ DEFAULT_PROFILES = [
         "pl1_w": 55,
         "pl2_w": 75,
         "tau_s": 48,
+        "cpu_level": "low",
         "gpu_level": "low",
         "fan_mode": "auto",
         "fan_rpm": 2500,
@@ -30,6 +53,7 @@ DEFAULT_PROFILES = [
         "pl1_w": 60,
         "pl2_w": 80,
         "tau_s": 48,
+        "cpu_level": "medium",
         "gpu_level": "medium",
         "fan_mode": "auto",
         "fan_rpm": 3000,
@@ -43,6 +67,7 @@ DEFAULT_PROFILES = [
         "pl1_w": 75,
         "pl2_w": 95,
         "tau_s": 48,
+        "cpu_level": "high",
         "gpu_level": "medium",
         "fan_mode": "manual",
         "fan_rpm": 4000,
@@ -56,6 +81,7 @@ DEFAULT_PROFILES = [
         "pl1_w": 130,
         "pl2_w": 150,
         "tau_s": 48,
+        "cpu_level": "boost",
         "gpu_level": "high",
         "fan_mode": "max",
         "fan_rpm": 5000,
@@ -80,6 +106,7 @@ class Profile:
     pl1_w: float
     pl2_w: float
     tau_s: float = 48.0
+    cpu_level: str = "boost"  # low|medium|high|boost|custom — custom 才写 PL1/PL2
     gpu_level: str = "medium"
     fan_mode: str = "auto"  # auto | max | manual
     fan_rpm: int = 3000
@@ -89,17 +116,24 @@ class Profile:
 
     @staticmethod
     def from_dict(d: dict[str, Any]) -> "Profile":
+        from .backends.synapse_gpu import CPU_BOOST_NAMES, cpu_boost_for_pl1
+
         fan_mode = d.get("fan_mode")
         if not fan_mode:
             fan_mode = "max" if d.get("max_fan") else "auto"
         fan_mode = str(fan_mode).lower()
         fan_rpm = int(d.get("fan_rpm", 3000))
+        pl1 = float(d["pl1_w"])
+        cpu_level = str(d.get("cpu_level") or "").lower().strip()
+        if cpu_level not in VALID_CPU_LEVELS:
+            cpu_level = CPU_BOOST_NAMES[cpu_boost_for_pl1(pl1)]
         return Profile(
             id=str(d["id"]),
             name=str(d["name"]),
-            pl1_w=float(d["pl1_w"]),
+            pl1_w=pl1,
             pl2_w=float(d["pl2_w"]),
             tau_s=float(d.get("tau_s", 48)),
+            cpu_level=cpu_level,
             gpu_level=str(d.get("gpu_level", "medium")),
             fan_mode=fan_mode,
             fan_rpm=fan_rpm,
@@ -161,7 +195,7 @@ class ProfileManager:
         if not self.path.is_file():
             self.profiles = [Profile.from_dict(p) for p in DEFAULT_PROFILES]
             self.undervolt_cfg = UndervoltConfig()
-            self.settings = {}
+            self.settings = _merge_feature_defaults({})
             self.fan_curve_cfg = FanCurveConfig()
             self.save()
             return
@@ -176,7 +210,7 @@ class ProfileManager:
         self.gpu_tdp_measured = dict(data.get("gpu_tdp_measured", self.gpu_tdp_measured))
         self.profiles = [Profile.from_dict(p) for p in data.get("profiles", DEFAULT_PROFILES)]
         self.active_profile_id = data.get("active_profile_id")
-        self.settings = dict(data.get("settings") or {})
+        self.settings = _merge_feature_defaults(dict(data.get("settings") or {}))
         self.fan_curve_cfg = FanCurveConfig.from_dict(data.get("fan_curves"))
 
     def save(self) -> None:
@@ -225,6 +259,7 @@ class ProfileManager:
         fan_rpm: int = 3000,
         afterburner_profile: Optional[int] = None,
         hotkey: Optional[str] = None,
+        cpu_level: str = "boost",
     ) -> Profile:
         if not fan_mode:
             fan_mode = "max" if max_fan else "auto"
@@ -234,6 +269,7 @@ class ProfileManager:
             pl1_w=pl1_w,
             pl2_w=pl2_w,
             tau_s=tau_s,
+            cpu_level=str(cpu_level or "boost").lower(),
             gpu_level=gpu_level,
             fan_mode=fan_mode,
             fan_rpm=int(fan_rpm),
@@ -255,6 +291,24 @@ class ProfileManager:
         self.save()
         return True
 
+    def feature_enabled(self, name: str) -> bool:
+        defaults = DEFAULT_FEATURE_FLAGS
+        if name == "enable_fan_curve":
+            return bool(getattr(self.fan_curve_cfg, "enabled", False))
+        return bool(self.settings.get(name, defaults.get(name, False)))
+
+    def set_feature(self, name: str, enabled: bool) -> None:
+        if name == "enable_fan_curve":
+            if self.fan_curve_cfg is not None:
+                self.fan_curve_cfg.enabled = bool(enabled)
+                self.save()
+            return
+        self.settings[name] = bool(enabled)
+        if name == "enable_cpu_tdp" and not enabled and self.rapl is not None:
+            # Stop background MSR / EC CPU-boost reassert.
+            self.rapl.last_target = None
+        self.save()
+
     def apply_profile(
         self,
         profile: Profile,
@@ -266,8 +320,20 @@ class ProfileManager:
         messages: list[str] = []
         ok = True
 
+        do_gpu = self.feature_enabled("enable_gpu_level")
+        do_cpu_lvl = self.feature_enabled("enable_cpu_level")
+        cpu_name = str(getattr(profile, "cpu_level", "boost") or "boost").lower()
+        is_custom_cpu = cpu_name == "custom"
+        # 仅 CPU 档=自定义 时写 PL1/PL2；电压模块独立。
+        do_tdp = do_cpu_lvl and is_custom_cpu
+        do_uv = bool(apply_undervolt) and self.feature_enabled("enable_undervolt")
+        curve_on = self.feature_enabled("enable_fan_curve")
+        # Profile fan_mode only when GPU module on and software curve off.
+        do_profile_fan = do_gpu and not curve_on
+        touch_ec = do_gpu or do_cpu_lvl or curve_on
+
         before_synapse = set()
-        if suppress_synapse and self.synapse is not None:
+        if suppress_synapse and self.synapse is not None and touch_ec:
             try:
                 from .backends.synapse_guard import list_synapse_ui_pids
 
@@ -275,35 +341,84 @@ class ProfileManager:
             except Exception:
                 before_synapse = set()
 
-        curve_on = bool(getattr(self.fan_curve_cfg, "enabled", False))
-
-        # 1) GPU/fan first (EC may touch power policy).
-        if self.synapse is not None:
+        # 1) EC CPU/GPU/fan (Synapse Custom sliders).
+        if self.synapse is not None and touch_ec:
             try:
-                # When software fan curves are on, only set GPU boost; curve loop owns RPM.
-                if curve_on:
-                    from .backends.synapse_gpu import NAME_TO_LEVEL
+                from .backends.synapse_gpu import (
+                    CPU_BOOST_NAMES,
+                    NAME_TO_CPU_BOOST,
+                    NAME_TO_LEVEL,
+                    CpuBoost,
+                )
 
-                    level = NAME_TO_LEVEL.get(str(profile.gpu_level).lower())
-                    if level is None:
-                        raise ValueError(f"Invalid gpu_level: {profile.gpu_level}")
-                    self.synapse.set_perf_mode(4, 1)  # CUSTOM + manual for curve control
-                    self.synapse.set_max_fan(False)
-                    self.synapse.set_gpu_boost(level)
-                    messages.append(f"GPU OK: {profile.gpu_level} (风扇由温度曲线接管)")
+                cpu_name = str(getattr(profile, "cpu_level", "boost") or "boost").lower()
+                if is_custom_cpu:
+                    # Custom PL needs a high EC floor so firmware won't clamp ~55W.
+                    cpu_boost = CpuBoost.BOOST
                 else:
-                    level = self.synapse.apply(
-                        profile.gpu_level,
-                        max_fan=profile.max_fan,
-                        fan_mode=profile.fan_mode,
-                        fan_rpm=profile.fan_rpm,
-                    )
-                    messages.append(f"GPU/风扇 OK: {level}")
+                    cpu_boost = NAME_TO_CPU_BOOST.get(cpu_name, CpuBoost.BOOST)
+                gpu_level = NAME_TO_LEVEL.get(str(profile.gpu_level).lower())
+                if do_gpu and gpu_level is None:
+                    raise ValueError(f"Invalid gpu_level: {profile.gpu_level}")
+
+                def _apply_ec() -> str:
+                    parts: list[str] = []
+                    if do_profile_fan and do_gpu and gpu_level is not None:
+                        tag = self.synapse.apply(
+                            profile.gpu_level,
+                            max_fan=profile.max_fan,
+                            fan_mode=profile.fan_mode,
+                            fan_rpm=profile.fan_rpm,
+                            cpu_boost=cpu_boost if do_cpu_lvl else None,
+                            touch_cpu_boost=do_cpu_lvl,
+                        )
+                        parts.append(f"GPU/风扇 OK: {tag}")
+                        return " | ".join(parts)
+
+                    self.synapse.set_perf_mode_custom()
+                    if do_profile_fan:
+                        self.synapse.apply_fan(profile.fan_mode, profile.fan_rpm)
+                        parts.append(f"风扇={profile.fan_mode}")
+                    else:
+                        self.synapse.set_max_fan(False)
+                    if do_cpu_lvl:
+                        self.synapse.set_cpu_boost(cpu_boost)
+                        if is_custom_cpu:
+                            parts.append("CPU档=自定义(EC=boost)")
+                        else:
+                            parts.append(f"CPU档={CPU_BOOST_NAMES.get(cpu_boost, cpu_boost)}")
+                    if do_gpu and gpu_level is not None:
+                        self.synapse.set_gpu_boost(gpu_level)
+                        note = "风扇由温度曲线接管" if curve_on else "仅 GPU"
+                        parts.append(f"GPU={profile.gpu_level} ({note})")
+                    return " | ".join(parts) if parts else "EC 无变更"
+
+                if do_cpu_lvl:
+                    tag = _apply_ec()
+                else:
+                    tag = self.synapse.preserve_cpu_boost(_apply_ec)
+                    if do_gpu and self.feature_enabled("pin_ec_cpu_boost"):
+                        pin_name = str(
+                            self.settings.get("pinned_ec_cpu_boost") or "boost"
+                        ).lower()
+                        pin = NAME_TO_CPU_BOOST.get(pin_name, CpuBoost.BOOST)
+                        if int(pin) > int(CpuBoost.BOOST):
+                            pin = CpuBoost.BOOST
+                        got = self.synapse.ensure_cpu_boost_at_least(pin)
+                        tag = f"{tag} | EC CPU={CPU_BOOST_NAMES.get(got, got)}"
+                messages.append(tag)
+                try:
+                    messages.append(self.synapse.read_boost_state())
+                except Exception:
+                    pass
             except Exception as exc:  # noqa: BLE001
                 ok = False
-                messages.append(f"GPU/风扇失败: {exc}")
+                messages.append(f"EC CPU/GPU/风扇失败: {exc}")
+        else:
+            if not do_gpu and not do_cpu_lvl:
+                messages.append("已跳过 EC CPU/GPU 档位（模块关闭）")
 
-        if suppress_synapse and self.synapse is not None:
+        if suppress_synapse and self.synapse is not None and before_synapse:
             try:
                 from .backends.synapse_guard import snapshot_and_suppress
 
@@ -314,7 +429,7 @@ class ProfileManager:
                 pass
 
         # 2) Undervolt
-        if apply_undervolt and self.undervolt is not None:
+        if do_uv and self.undervolt is not None:
             try:
                 from .backends.cpu_undervolt import UndervoltSettings
 
@@ -338,9 +453,11 @@ class ProfileManager:
             except Exception as exc:  # noqa: BLE001
                 ok = False
                 messages.append(f"UV 失败: {exc}")
+        elif apply_undervolt and not self.feature_enabled("enable_undervolt"):
+            messages.append("已跳过降压（模块关闭）")
 
-        # 3) CPU PL last — after EC HID, so Razer won't immediately overwrite.
-        if self.rapl is not None:
+        # 3) CPU PL — only when CPU 档 = 自定义.
+        if do_tdp and self.rapl is not None:
             try:
                 got = self.rapl.apply(profile.pl1_w, profile.pl2_w, profile.tau_s)
                 drift = abs(got.pl1_w - profile.pl1_w) > 3 or abs(got.pl2_w - profile.pl2_w) > 3
@@ -351,6 +468,13 @@ class ProfileManager:
             except Exception as exc:  # noqa: BLE001
                 ok = False
                 messages.append(f"CPU PL 失败: {exc}")
+        else:
+            if self.rapl is not None:
+                self.rapl.last_target = None
+            if do_cpu_lvl and not is_custom_cpu:
+                messages.append("CPU 档为固定档，已跳过自定义 PL1/PL2")
+            elif not do_cpu_lvl:
+                messages.append("已跳过 CPU 档位（模块关闭）")
 
         if profile.afterburner_profile and self.afterburner is not None:
             try:
@@ -394,6 +518,8 @@ class ProfileManager:
         return ApplyResult(ok=ok and result.ok, messages=messages, profile_id=safe.id)
 
     def reapply_undervolt(self) -> ApplyResult:
+        if not self.feature_enabled("enable_undervolt"):
+            return ApplyResult(ok=True, messages=["已跳过降压（模块关闭）"])
         if self.undervolt is None:
             return ApplyResult(ok=False, messages=["降压后端不可用"])
         try:

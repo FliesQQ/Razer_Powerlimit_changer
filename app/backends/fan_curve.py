@@ -23,7 +23,7 @@ DEFAULT_GPU_CURVE: list[tuple[int, int]] = [
     (90, 5500),
 ]
 
-RPM_MIN = 2000
+RPM_MIN = 0
 RPM_MAX = 5500
 
 
@@ -134,6 +134,16 @@ class FanCurveController:
     def force_tick(self) -> None:
         self._tick(force=True)
 
+    def force_apply_now(self) -> str:
+        """
+        Persist-independent EC write of current curve targets.
+        Works even when the software-curve toggle is off (one-shot).
+        """
+        self._last_cpu_rpm = None
+        self._last_gpu_rpm = None
+        self._tick(force=True, ignore_enabled=True)
+        return self.last_status
+
     def _set_status(self, text: str) -> None:
         self.last_status = text
         if self._on_status:
@@ -156,9 +166,12 @@ class FanCurveController:
                 sleep_s = 3.0
             self._stop.wait(sleep_s)
 
-    def _tick(self, *, force: bool) -> None:
+    def _tick(self, *, force: bool, ignore_enabled: bool = False) -> None:
         cfg = self._get_config()
-        if not cfg.enabled or self._synapse is None:
+        if self._synapse is None:
+            self._set_status("曲线错误: 无 Razer HID")
+            return
+        if not ignore_enabled and not cfg.enabled:
             return
         reading = self._temps.read()
         self.last_cpu_c = reading.cpu_c
@@ -181,11 +194,16 @@ class FanCurveController:
             or abs(gpu_rpm - self._last_gpu_rpm) >= 100
         )
         if changed:
-            # Custom + manual fan mode, then per-zone RPM.
-            self._synapse.set_perf_mode(4, 1)  # CUSTOM + manual
-            self._synapse.set_max_fan(False)
-            self._synapse.set_fan_rpm_zone(1, cpu_rpm)
-            self._synapse.set_fan_rpm_zone(2, gpu_rpm)
+            # Per-zone fan writes touch Custom mode and can reset EC CPU boost to low.
+            def _write_fans() -> None:
+                self._synapse.set_max_fan(False)
+                self._synapse.set_fan_rpm_zone(1, cpu_rpm)
+                self._synapse.set_fan_rpm_zone(2, gpu_rpm)
+
+            if hasattr(self._synapse, "preserve_cpu_boost"):
+                self._synapse.preserve_cpu_boost(_write_fans)
+            else:
+                _write_fans()
             self._last_cpu_rpm = cpu_rpm
             self._last_gpu_rpm = gpu_rpm
             # Brief settle; avoid readback (wakes Synapse).
@@ -193,6 +211,9 @@ class FanCurveController:
 
         self.last_cpu_rpm = cpu_rpm
         self.last_gpu_rpm = gpu_rpm
+        cpu_note = "自动(可停)" if cpu_rpm <= 0 else f"{cpu_rpm}"
+        gpu_note = "自动(可停)" if gpu_rpm <= 0 else f"{gpu_rpm}"
+        prefix = "强制写入" if ignore_enabled else "曲线"
         self._set_status(
-            f"曲线: CPU {cpu_temp:.0f}°C→{cpu_rpm}  GPU {gpu_temp:.0f}°C→{gpu_rpm}"
+            f"{prefix}: CPU {cpu_temp:.0f}°C→{cpu_note}  GPU {gpu_temp:.0f}°C→{gpu_note}"
         )

@@ -20,6 +20,15 @@ GPU_LABELS = [
     ("高 (≥175W / 整机~205W)", "high"),
 ]
 
+# 与雷云 Custom CPU 滑条一致；「自定义」才写 PL1/PL2
+CPU_LEVEL_LABELS = [
+    ("低", "low"),
+    ("中", "medium"),
+    ("高", "high"),
+    ("增强", "boost"),
+    ("自定义", "custom"),
+]
+
 
 class AppGUI:
     def __init__(
@@ -40,8 +49,14 @@ class AppGUI:
         self._busy = False
 
         root.title("Blade 16 功耗快捷切换")
-        root.geometry("960x700")
-        root.minsize(880, 600)
+        # Tall enough for 风扇曲线 tab (two charts + tools + buttons + live status).
+        self._win_w, self._win_h = 1020, 960
+        root.geometry(f"{self._win_w}x{self._win_h}")
+        root.minsize(self._win_w, self._win_h)
+        root.maxsize(self._win_w, self._win_h)
+        root.resizable(False, False)
+        # Remove maximize / thick-frame sizing on Windows after HWND exists.
+        root.after(50, self._lock_window_chrome)
 
         self.status_var = tk.StringVar(value="就绪")
         self.live_var = tk.StringVar(value="读数加载中…")
@@ -50,6 +65,7 @@ class AppGUI:
         self.pl2_var = tk.StringVar(value="75")
         self.tau_var = tk.StringVar(value="48")
         self.gpu_var = tk.StringVar(value="low")
+        self.cpu_level_var = tk.StringVar(value="boost")
         self.max_fan_var = tk.BooleanVar(value=False)
         self.fan_mode_var = tk.StringVar(value="auto")
         self.fan_rpm_var = tk.StringVar(value="3000")
@@ -84,10 +100,53 @@ class AppGUI:
         except Exception:
             autostart_on = bool(settings.get("autostart_enabled", False))
         self.autostart_var = tk.BooleanVar(value=autostart_on)
+        self.feat_cpu_level = tk.BooleanVar(
+            value=bool(settings.get("enable_cpu_level", True))
+        )
+        self.feat_gpu = tk.BooleanVar(
+            value=bool(settings.get("enable_gpu_level", True))
+        )
+        self.feat_uv = tk.BooleanVar(
+            value=bool(settings.get("enable_undervolt", True))
+        )
+        self.on_features_changed: Optional[Callable[[], None]] = None
 
         self._build()
         self.refresh_list()
         self.root.after(500, self._poll_live)
+
+    def _lock_window_chrome(self) -> None:
+        """Disable maximize box and sizing border (Windows)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            hwnd = int(self.root.winfo_id())
+            if not hwnd:
+                self.root.after(100, self._lock_window_chrome)
+                return
+            user32 = ctypes.windll.user32
+            GWL_STYLE = -16
+            WS_MAXIMIZEBOX = 0x00010000
+            WS_THICKFRAME = 0x00040000
+            get_long = getattr(user32, "GetWindowLongPtrW", None) or user32.GetWindowLongW
+            set_long = getattr(user32, "SetWindowLongPtrW", None) or user32.SetWindowLongW
+            style = int(get_long(hwnd, GWL_STYLE) or 0)
+            style &= ~WS_MAXIMIZEBOX
+            style &= ~WS_THICKFRAME
+            set_long(hwnd, GWL_STYLE, style)
+            # Apply style change.
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+            user32.SetWindowPos(
+                hwnd, 0, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+            )
+            self.root.geometry(f"{self._win_w}x{self._win_h}")
+            self.root.resizable(False, False)
+        except Exception:
+            pass
 
     def _build(self) -> None:
         # Status bar at the very bottom; live status sits just above it (all tabs).
@@ -97,7 +156,12 @@ class AppGUI:
 
         live = ttk.LabelFrame(self.root, text="实时状态", padding=(8, 4))
         live.pack(side=tk.BOTTOM, fill=tk.X, padx=8, pady=(0, 2))
-        ttk.Label(live, textvariable=self.live_var, justify=tk.LEFT).pack(anchor=tk.W)
+        ttk.Label(
+            live,
+            textvariable=self.live_var,
+            justify=tk.LEFT,
+            wraplength=980,
+        ).pack(anchor=tk.W, fill=tk.X)
 
         top = ttk.Frame(self.root, padding=8)
         top.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -124,13 +188,73 @@ class AppGUI:
         nb = ttk.Notebook(right)
         nb.pack(fill=tk.BOTH, expand=True)
         tab_main = ttk.Frame(nb, padding=6)
-        tab_curve = ttk.Frame(nb, padding=6)
+        tab_curve_outer = ttk.Frame(nb)
         tab_osd = ttk.Frame(nb, padding=6)
         tab_tray = ttk.Frame(nb, padding=6)
         nb.add(tab_main, text="主页")
-        nb.add(tab_curve, text="风扇曲线")
+        nb.add(tab_curve_outer, text="风扇曲线")
         nb.add(tab_osd, text="桌面 OSD")
         nb.add(tab_tray, text="托盘图标")
+
+        # Fan-curve tab: scrollable so bottom buttons stay reachable in fixed window.
+        curve_canvas = tk.Canvas(tab_curve_outer, highlightthickness=0)
+        curve_scroll = ttk.Scrollbar(tab_curve_outer, orient=tk.VERTICAL, command=curve_canvas.yview)
+        curve_canvas.configure(yscrollcommand=curve_scroll.set)
+        curve_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        curve_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tab_curve = ttk.Frame(curve_canvas, padding=6)
+        curve_win = curve_canvas.create_window((0, 0), window=tab_curve, anchor="nw")
+
+        def _curve_on_frame_configure(_event=None) -> None:
+            curve_canvas.configure(scrollregion=curve_canvas.bbox("all"))
+
+        def _curve_on_canvas_configure(event) -> None:
+            curve_canvas.itemconfigure(curve_win, width=event.width)
+
+        def _curve_on_mousewheel(event) -> None:
+            # Only scroll when the event originates under the fan-curve tab.
+            w = event.widget
+            while w is not None:
+                if w in (tab_curve_outer, curve_canvas, tab_curve):
+                    curve_canvas.yview_scroll(int(-event.delta / 120), "units")
+                    return "break"
+                w = getattr(w, "master", None)
+            return None
+
+        tab_curve.bind("<Configure>", _curve_on_frame_configure)
+        curve_canvas.bind("<Configure>", _curve_on_canvas_configure)
+        self.root.bind_all("<MouseWheel>", _curve_on_mousewheel, add="+")
+
+        # ---- 功能模块开关（互不捆绑）----
+        feats = ttk.LabelFrame(
+            tab_main,
+            text="功能模块（可独立开关）",
+            padding=8,
+        )
+        feats.pack(fill=tk.X, pady=(0, 6))
+        ttk.Checkbutton(
+            feats,
+            text="CPU 档位（低/中/高/增强/自定义）",
+            variable=self.feat_cpu_level,
+            command=self._on_features_changed,
+        ).grid(row=0, column=0, sticky=tk.W, padx=(0, 12))
+        ttk.Checkbutton(
+            feats,
+            text="GPU 档位",
+            variable=self.feat_gpu,
+            command=self._on_features_changed,
+        ).grid(row=0, column=1, sticky=tk.W, padx=(0, 12))
+        ttk.Checkbutton(
+            feats,
+            text="CPU 降压（独立）",
+            variable=self.feat_uv,
+            command=self._on_features_changed,
+        ).grid(row=0, column=2, sticky=tk.W, padx=(0, 12))
+        ttk.Label(
+            feats,
+            text="CPU 选「自定义」才应用 PL1/PL2/Tau；固定档只改雷云同款 EC。风扇曲线在对应页启用。",
+            foreground="#666666",
+        ).grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
         # ---- 主页：编辑器 + 降压 ----
         editor = ttk.LabelFrame(tab_main, text="搭配编辑器", padding=8)
@@ -155,6 +279,17 @@ class AppGUI:
         r += 1
         ttk.Label(editor, text="Tau (s)").grid(row=r, column=0, sticky=tk.W, pady=2)
         ttk.Entry(editor, textvariable=self.tau_var, width=10).grid(row=r, column=1, sticky=tk.W)
+        ttk.Label(
+            editor, text="← 仅 CPU 档=自定义时生效", foreground="#666666"
+        ).grid(row=r, column=2, columnspan=2, sticky=tk.W, padx=(8, 0))
+        r += 1
+        ttk.Label(editor, text="CPU 档").grid(row=r, column=0, sticky=tk.W, pady=2)
+        cpu_frame = ttk.Frame(editor)
+        cpu_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W)
+        for text, val in CPU_LEVEL_LABELS:
+            ttk.Radiobutton(
+                cpu_frame, text=text, value=val, variable=self.cpu_level_var
+            ).pack(side=tk.LEFT, padx=4)
         r += 1
         ttk.Label(editor, text="GPU 档").grid(row=r, column=0, sticky=tk.W, pady=2)
         gpu_frame = ttk.Frame(editor)
@@ -167,18 +302,24 @@ class AppGUI:
         ttk.Label(editor, text="风扇").grid(row=r, column=0, sticky=tk.W, pady=2)
         fan_frame = ttk.Frame(editor)
         fan_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W)
+        self._fan_mode_radios = []
         for text, val in [
             ("自动", "auto"),
             ("最大", "max"),
             ("手动 RPM", "manual"),
         ]:
-            ttk.Radiobutton(
+            rb = ttk.Radiobutton(
                 fan_frame, text=text, value=val, variable=self.fan_mode_var, command=self._on_fan_mode
-            ).pack(side=tk.LEFT, padx=4)
+            )
+            rb.pack(side=tk.LEFT, padx=4)
+            self._fan_mode_radios.append(rb)
+        r += 1
+        self.fan_mutex_hint = ttk.Label(editor, text="", foreground="#886600")
+        self.fan_mutex_hint.grid(row=r, column=1, columnspan=3, sticky=tk.W)
         r += 1
         ttk.Label(editor, text="手动转速").grid(row=r, column=0, sticky=tk.W, pady=2)
         ttk.Entry(editor, textvariable=self.fan_rpm_var, width=10).grid(row=r, column=1, sticky=tk.W)
-        ttk.Label(editor, text="RPM (2000-5500)").grid(row=r, column=2, sticky=tk.W)
+        ttk.Label(editor, text="RPM (0-5500，0=停转)").grid(row=r, column=2, sticky=tk.W)
         r += 1
         ttk.Label(editor, text="Afterburner #").grid(row=r, column=0, sticky=tk.W, pady=2)
         ttk.Entry(editor, textvariable=self.ab_var, width=10).grid(row=r, column=1, sticky=tk.W)
@@ -221,32 +362,47 @@ class AppGUI:
         # ---- 风扇曲线（图标拖拽 + 文本同步）----
         ttk.Checkbutton(
             tab_curve,
-            text="启用软件曲线（按温度分别控制 CPU/GPU 风扇；启用后档位风扇设置暂不生效）",
+            text="启用软件曲线（与性能档风扇互斥：启用后档位风扇不生效；关闭后自动恢复当前档风扇）",
             variable=self.curve_enabled,
+            command=self._on_curve_enable_toggle,
         ).pack(anchor=tk.W)
         charts = ttk.Frame(tab_curve)
         charts.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
         FanCurveChart(
             charts,
-            title="CPU 风扇曲线（拖动圆点调整；空白处点击加点）",
+            title="CPU 风扇曲线（拖动圆点；也可用下方数值写入）",
             textvariable=self.curve_cpu_var,
             width=440,
-            height=170,
+            height=155,
         ).pack(fill=tk.BOTH, expand=True, pady=(0, 6))
         FanCurveChart(
             charts,
             title="GPU 风扇曲线",
             textvariable=self.curve_gpu_var,
             width=440,
-            height=170,
+            height=155,
         ).pack(fill=tk.BOTH, expand=True)
         ttk.Label(
             tab_curve,
-            text="RPM 范围 2000–5500，步进 100。下方文本可与曲线互相同步编辑。",
+            text=(
+                "RPM 允许 0–5500（步进 100）。可用「数值写入」把低温点设为 0/500/1000 等，再点保存。\n"
+                "曲线 0 = 该风扇交回 EC 自动（低温可停转）；>0 = 手动固定转速。"
+            ),
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=4)
-        ttk.Button(tab_curve, text="保存并应用曲线", command=self.save_fan_curves).pack(
-            anchor=tk.W
+        btns_c = ttk.Frame(tab_curve)
+        btns_c.pack(anchor=tk.W, pady=(2, 0))
+        ttk.Button(btns_c, text="仅保存曲线", command=self.save_fan_curves_only).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(btns_c, text="保存并应用曲线", command=self.save_fan_curves).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        ttk.Button(
+            btns_c, text="强制写入当前风扇曲线数据", command=self.force_write_fan_curves
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btns_c, text="打开配置文件", command=self._open_profiles_file).pack(
+            side=tk.LEFT
         )
 
         # ---- 桌面 OSD ----
@@ -292,6 +448,24 @@ class AppGUI:
             wraplength=640,
         ).pack(anchor=tk.W, pady=(4, 0))
 
+        self._sync_fan_mutex_ui()
+
+    def _sync_fan_mutex_ui(self) -> None:
+        curve_on = bool(self.curve_enabled.get())
+        state = ["disabled"] if curve_on else ["!disabled"]
+        for rb in getattr(self, "_fan_mode_radios", []):
+            try:
+                rb.state(state)
+            except Exception:
+                pass
+        hint = getattr(self, "fan_mutex_hint", None)
+        if hint is not None:
+            hint.configure(
+                text="当前由软件风扇曲线接管，档位风扇选项暂不生效"
+                if curve_on
+                else ""
+            )
+
     @staticmethod
     def _points_to_text(points) -> str:
         from .backends.fan_curve import DEFAULT_CPU_CURVE
@@ -317,13 +491,33 @@ class AppGUI:
             parts.append((float(a.strip()), float(b.strip())))
         return normalize_points(parts)
 
+    def save_fan_curves_only(self) -> None:
+        """Persist curve points; if curve is enabled, refresh live targets too."""
+        self._save_fan_curves(apply=False)
+        if bool(self.curve_enabled.get()):
+            cb = getattr(self, "on_fan_curves_changed", None)
+            if cb:
+                try:
+                    cb()
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showwarning("曲线", str(exc))
+
     def save_fan_curves(self) -> None:
+        self._save_fan_curves(apply=True)
+
+    def _save_fan_curves(self, *, apply: bool) -> None:
         try:
             cpu = self._parse_points(self.curve_cpu_var.get())
             gpu = self._parse_points(self.curve_gpu_var.get())
         except Exception:
             messagebox.showerror("错误", "曲线格式无效，请用: 温度,RPM; 温度,RPM; …")
             return
+        # Explicitly allow 0–5500; reject nothing in that range.
+        for label, pts in (("CPU", cpu), ("GPU", gpu)):
+            for t, r in pts:
+                if r < 0 or r > 5500:
+                    messagebox.showerror("错误", f"{label} 曲线 RPM 超范围: {t}°C → {r}")
+                    return
         from .backends.fan_curve import FanCurveConfig
 
         cfg = FanCurveConfig(
@@ -334,15 +528,91 @@ class AppGUI:
         self.manager.update_fan_curves(cfg)
         self.curve_cpu_var.set(self._points_to_text(cfg.cpu_points))
         self.curve_gpu_var.set(self._points_to_text(cfg.gpu_points))
-        # Ask main loop controller to apply immediately if wired.
-        cb = getattr(self, "on_fan_curves_changed", None)
+        self._sync_fan_mutex_ui()
+        cfg_path = str(getattr(self.manager, "path", "") or "")
+        # Confirm first CPU point landed on disk (helps catch stale editor views).
+        disk_hint = ""
+        try:
+            import json
+            from pathlib import Path
+
+            raw = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+            first = (raw.get("fan_curves") or {}).get("cpu") or []
+            if first:
+                disk_hint = f" 盘上首点={first[0][0]}°/{first[0][1]}"
+        except Exception:
+            pass
+        if apply:
+            cb = getattr(self, "on_fan_curves_changed", None)
+            if cb:
+                try:
+                    cb()
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showwarning("曲线", str(exc))
+                    return
+            self._set_status(
+                "风扇曲线已保存"
+                + ("并启用" if cfg.enabled else "（未启用，档位风扇应已恢复）")
+                + f" → {cfg_path}"
+                + disk_hint
+            )
+        else:
+            self._set_status(
+                f"风扇曲线已写入（CPU {len(cfg.cpu_points)} 点 / GPU {len(cfg.gpu_points)} 点；"
+                f"启用={'是' if cfg.enabled else '否'}）→ {cfg_path}{disk_hint}"
+            )
+
+    def force_write_fan_curves(self) -> None:
+        """Save editor points, then force one EC write of current curve targets."""
+        self._save_fan_curves(apply=False)
+        cb = getattr(self, "on_fan_curves_force_write", None)
+        if not cb:
+            self._set_status("强制写入回调未连接")
+            return
+        try:
+            cb()
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showwarning("强制写入", str(exc))
+
+    def _on_features_changed(self) -> None:
+        self.manager.set_feature("enable_cpu_level", bool(self.feat_cpu_level.get()))
+        self.manager.set_feature("enable_gpu_level", bool(self.feat_gpu.get()))
+        self.manager.set_feature("enable_undervolt", bool(self.feat_uv.get()))
+        flags = (
+            f"CPU档={'开' if self.feat_cpu_level.get() else '关'} "
+            f"GPU={'开' if self.feat_gpu.get() else '关'} "
+            f"UV={'开' if self.feat_uv.get() else '关'} "
+            f"曲线={'开' if self.curve_enabled.get() else '关'}"
+        )
+        self._set_status(f"功能模块已更新: {flags}")
+        cb = getattr(self, "on_features_changed", None)
         if cb:
             try:
                 cb()
-            except Exception as exc:  # noqa: BLE001
-                messagebox.showwarning("曲线", str(exc))
-                return
-        self._set_status("风扇曲线已保存" + ("并启用" if cfg.enabled else "（未启用）"))
+            except Exception:
+                pass
+
+    def _on_curve_enable_toggle(self) -> None:
+        """Mutual exclusion: enabling curves yields profile fans; disabling restores them."""
+        # Keep whatever points are currently in the editors.
+        self._save_fan_curves(apply=True)
+
+    def _open_profiles_file(self) -> None:
+        path = getattr(self.manager, "path", None)
+        if not path:
+            messagebox.showinfo("配置", "未找到 profiles.json 路径")
+            return
+        from pathlib import Path
+        import os
+
+        p = Path(path)
+        if not p.is_file():
+            messagebox.showwarning("配置", f"文件不存在:\n{p}")
+            return
+        try:
+            os.startfile(str(p))  # noqa: S606 — Windows open with default editor
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("配置", f"无法打开:\n{p}\n{exc}")
 
     def set_xtu_path_label(self, path: str, found: bool) -> None:
         if found and path:
@@ -404,7 +674,8 @@ class AppGUI:
             hk = f"  [{p.hotkey}]" if p.hotkey else ""
             self.listbox.insert(
                 tk.END,
-                f"{p.name}  CPU {p.pl1_w:.0f}/{p.pl2_w:.0f}  GPU {p.gpu_level}  "
+                f"{p.name}  CPU档 {getattr(p,'cpu_level','?')}  "
+                f"PL {p.pl1_w:.0f}/{p.pl2_w:.0f}  GPU {p.gpu_level}  "
                 f"Fan {getattr(p,'fan_mode','auto')}"
                 + (f":{p.fan_rpm}" if getattr(p, "fan_mode", "") == "manual" else "")
                 + f"{hk}{mark}",
@@ -431,6 +702,7 @@ class AppGUI:
         self.pl1_var.set(str(p.pl1_w))
         self.pl2_var.set(str(p.pl2_w))
         self.tau_var.set(str(p.tau_s))
+        self.cpu_level_var.set(getattr(p, "cpu_level", "boost") or "boost")
         self.gpu_var.set(p.gpu_level)
         self.fan_mode_var.set(getattr(p, "fan_mode", "max" if p.max_fan else "auto"))
         self.fan_rpm_var.set(str(getattr(p, "fan_rpm", 3000)))
@@ -462,6 +734,7 @@ class AppGUI:
             "pl1_w": float(self.pl1_var.get()),
             "pl2_w": float(self.pl2_var.get()),
             "tau_s": float(self.tau_var.get()),
+            "cpu_level": self.cpu_level_var.get(),
             "gpu_level": self.gpu_var.get(),
             "fan_mode": fan_mode,
             "fan_rpm": fan_rpm,
@@ -527,6 +800,7 @@ class AppGUI:
             pl1_w=data["pl1_w"],
             pl2_w=data["pl2_w"],
             tau_s=data["tau_s"],
+            cpu_level=data.get("cpu_level", "boost"),
             gpu_level=data["gpu_level"],
             fan_mode=data["fan_mode"],
             fan_rpm=data["fan_rpm"],
@@ -571,6 +845,7 @@ class AppGUI:
             pl1_w=data["pl1_w"],
             pl2_w=data["pl2_w"],
             tau_s=data["tau_s"],
+            cpu_level=data.get("cpu_level", "boost"),
             gpu_level=data["gpu_level"],
             max_fan=data["max_fan"],
             fan_mode=data["fan_mode"],

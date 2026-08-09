@@ -92,6 +92,31 @@ class WinRing0:
         self._dll.Wrmsr.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
         self._dll.Wrmsr.restype = ctypes.c_bool
 
+        # PCI / physical memory (MMIO RAPL unlock).
+        self._dll.ReadPciConfigDword.argtypes = [ctypes.c_uint32, ctypes.c_uint8]
+        self._dll.ReadPciConfigDword.restype = ctypes.c_uint32
+        self._dll.WritePciConfigDword.argtypes = [
+            ctypes.c_uint32,
+            ctypes.c_uint8,
+            ctypes.c_uint32,
+        ]
+        self._dll.WritePciConfigDword.restype = None
+        # BOOL Read/WritePhysicalMemory(DWORD_PTR addr, PBYTE buf, DWORD count, DWORD unitSize)
+        self._dll.ReadPhysicalMemory.argtypes = [
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        self._dll.ReadPhysicalMemory.restype = ctypes.c_bool
+        self._dll.WritePhysicalMemory.argtypes = [
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        self._dll.WritePhysicalMemory.restype = ctypes.c_bool
+
         if not self._dll.InitializeOls():
             status = int(self._dll.GetDllStatus())
             # restore cwd before raising
@@ -130,6 +155,53 @@ class WinRing0:
         edx = ctypes.c_uint32((value >> 32) & 0xFFFFFFFF)
         if not self._dll.Wrmsr(ctypes.c_uint32(index), eax, edx):
             raise OSError(f"Wrmsr(0x{index:X}) failed")
+
+    @staticmethod
+    def pci_addr(bus: int = 0, dev: int = 0, func: int = 0) -> int:
+        return ((bus & 0xFF) << 8) | ((dev & 0x1F) << 3) | (func & 0x7)
+
+    def read_pci_dword(self, bus: int, dev: int, func: int, reg: int) -> int:
+        self._ensure()
+        return int(
+            self._dll.ReadPciConfigDword(
+                ctypes.c_uint32(self.pci_addr(bus, dev, func)),
+                ctypes.c_uint8(reg & 0xFF),
+            )
+        )
+
+    def read_phys_dword(self, address: int) -> int:
+        self._ensure()
+        buf = (ctypes.c_uint32 * 1)()
+        ok = self._dll.ReadPhysicalMemory(
+            ctypes.c_size_t(address & 0xFFFFFFFFFFFF),
+            ctypes.byref(buf),
+            ctypes.c_uint32(1),
+            ctypes.c_uint32(4),
+        )
+        if not ok:
+            raise OSError(f"ReadPhysicalMemory(0x{address:X}) failed")
+        return int(buf[0])
+
+    def write_phys_dword(self, address: int, value: int) -> None:
+        self._ensure()
+        buf = (ctypes.c_uint32 * 1)(value & 0xFFFFFFFF)
+        ok = self._dll.WritePhysicalMemory(
+            ctypes.c_size_t(address & 0xFFFFFFFFFFFF),
+            ctypes.byref(buf),
+            ctypes.c_uint32(1),
+            ctypes.c_uint32(4),
+        )
+        if not ok:
+            raise OSError(f"WritePhysicalMemory(0x{address:X}) failed")
+
+    def read_phys_qword(self, address: int) -> int:
+        lo = self.read_phys_dword(address)
+        hi = self.read_phys_dword(address + 4)
+        return (hi << 32) | lo
+
+    def write_phys_qword(self, address: int, value: int) -> None:
+        self.write_phys_dword(address, value & 0xFFFFFFFF)
+        self.write_phys_dword(address + 4, (value >> 32) & 0xFFFFFFFF)
 
     def _ensure(self) -> None:
         if self._dll is None:

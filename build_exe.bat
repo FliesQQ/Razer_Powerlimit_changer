@@ -47,15 +47,20 @@ if errorlevel 1 (
 
 set "OUT=dist\BladePower_Release"
 echo [3/4] 组装输出目录 %OUT% ...
-if exist "%OUT%" rmdir /s /q "%OUT%"
-mkdir "%OUT%"
+if not exist "%OUT%" mkdir "%OUT%"
 
 copy /Y "dist\BladePower.exe" "%OUT%\BladePower.exe" >nul
 copy /Y "vendor\winring0\WinRing0x64.dll" "%OUT%\WinRing0x64.dll" >nul
 copy /Y "vendor\winring0\WinRing0x64.sys" "%OUT%\WinRing0x64.sys" >nul
 copy /Y "vendor\winring0\WinRing0.dll" "%OUT%\WinRing0.dll" >nul 2>nul
 copy /Y "vendor\winring0\WinRing0.sys" "%OUT%\WinRing0.sys" >nul 2>nul
-copy /Y "profiles.json" "%OUT%\profiles.json" >nul
+REM Do NOT wipe user profiles on rebuild — only seed if missing.
+if not exist "%OUT%\profiles.json" (
+  copy /Y "profiles.json" "%OUT%\profiles.json" >nul
+  echo 已写入初始 profiles.json
+) else (
+  echo 保留已有 %OUT%\profiles.json （不覆盖用户曲线/档位）
+)
 copy /Y "Synapse.ico" "%OUT%\Synapse.ico" >nul
 copy /Y "README.md" "%OUT%\README.md" >nul
 
