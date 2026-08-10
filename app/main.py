@@ -15,7 +15,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.admin import is_admin, relaunch_as_admin
+from app.auto_bright import AutoBrightConfig, AutoBrightController
 from app.backends.afterburner import AfterburnerBackend
+from app.backends.brightness import HybridBrightnessBackend
 from app.backends.cpu_rapl import CpuRaplBackend
 from app.backends.cpu_undervolt import CpuUndervoltBackend
 from app.backends.fan_curve import FanCurveController
@@ -357,6 +359,20 @@ def _main_run(args: argparse.Namespace) -> int:
                     synapse.set_cpu_boost(NAME_TO_CPU_BOOST.get(cpu_name, CpuBoost.BOOST))
                 except Exception:
                     pass
+            # Fan-curve / manual RPM can also drop GPU tier — keep it sticky.
+            if (
+                synapse is not None
+                and manager.feature_enabled("enable_gpu_level")
+                and p is not None
+            ):
+                try:
+                    from app.backends.synapse_gpu import NAME_TO_LEVEL
+
+                    gl = NAME_TO_LEVEL.get(str(p.gpu_level).lower())
+                    if gl is not None:
+                        synapse.set_gpu_boost(gl)
+                except Exception:
+                    pass
         except Exception:
             pass
         root.after(5000, reassert_pl)
@@ -407,6 +423,15 @@ def _main_run(args: argparse.Namespace) -> int:
                     msgs.append("风扇曲线已刷新")
                 except Exception:
                     pass
+            try:
+                ab_cfg = AutoBrightConfig.from_dict(
+                    (manager.settings or {}).get("auto_bright")
+                )
+                if auto_bright is not None and ab_cfg.enabled:
+                    auto_bright.notify_resume()
+                    msgs.append("亮度已校正")
+            except Exception:
+                pass
             text = f"{reason}已恢复: " + (" | ".join(msgs) if msgs else "无操作")
             try:
                 root.after(0, lambda t=text: gui._set_status(t[:200]))
@@ -600,12 +625,89 @@ def _main_run(args: argparse.Namespace) -> int:
 
     root.after(1500, apply_startup_profile)
 
+    def get_ec_pin_for_fans():
+        """Desired EC CPU/GPU after software-curve fan writes (avoid ~55W clamp)."""
+        from app.backends.synapse_gpu import (
+            CpuBoost,
+            GpuLevel,
+            NAME_TO_CPU_BOOST,
+            NAME_TO_LEVEL,
+        )
+
+        pid = manager.active_profile_id
+        p = manager.get(pid) if pid else None
+        cpu_pin = None
+        gpu_pin = None
+        if manager.feature_enabled("enable_cpu_level"):
+            if p is not None:
+                name = str(getattr(p, "cpu_level", "boost") or "boost").lower()
+                if name == "custom":
+                    cpu_pin = CpuBoost.BOOST
+                else:
+                    cpu_pin = NAME_TO_CPU_BOOST.get(name, CpuBoost.BOOST)
+            else:
+                # No active profile — use a high floor so we never re-pin "low".
+                cpu_pin = CpuBoost.BOOST
+        if manager.feature_enabled("enable_gpu_level"):
+            if p is not None:
+                gpu_pin = NAME_TO_LEVEL.get(str(p.gpu_level).lower())
+            if gpu_pin is None:
+                gpu_pin = GpuLevel.HIGH
+        return cpu_pin, gpu_pin
+
+    def after_fan_curve_write() -> None:
+        """If CPU tier is custom, also reassert MSR PL (EC+MSR both matter)."""
+        if rapl is None or rapl.last_target is None:
+            return
+        if not manager.feature_enabled("enable_cpu_level"):
+            return
+        pid = manager.active_profile_id
+        p = manager.get(pid) if pid else None
+        if p is None:
+            return
+        if str(getattr(p, "cpu_level", "") or "").lower() != "custom":
+            return
+        try:
+            want = rapl.last_target
+            got = rapl.read()
+            if abs(got.pl1_w - want[0]) > 3.0 or abs(got.pl2_w - want[1]) > 5.0:
+                rapl.reassert()
+        except Exception:
+            pass
+
     fan_ctrl = FanCurveController(
         synapse=synapse,
         temps=temps,
         get_config=lambda: manager.fan_curve_cfg,
+        get_ec_pin=get_ec_pin_for_fans,
+        on_after_fan_write=after_fan_curve_write,
     )
     fan_ctrl.start()
+
+    def get_auto_bright_cfg() -> AutoBrightConfig:
+        return AutoBrightConfig.from_dict(
+            (manager.settings or {}).get("auto_bright")
+        )
+
+    def save_auto_bright_cfg(cfg: AutoBrightConfig) -> None:
+        manager.update_settings(auto_bright=cfg.to_dict())
+
+    def on_auto_bright_status(snap: dict) -> None:
+        try:
+            gui.update_auto_bright_status(snap)
+        except Exception:
+            pass
+
+    auto_bright = AutoBrightController(
+        root,
+        get_config=get_auto_bright_cfg,
+        save_config=save_auto_bright_cfg,
+        backend=HybridBrightnessBackend(),
+        on_status=on_auto_bright_status,
+    )
+    gui.bind_auto_bright_controller(auto_bright)
+    gui.on_auto_bright_changed = lambda: None
+    auto_bright.start()
 
     register_hotkeys()
     root.after(5000, reassert_pl)
@@ -628,6 +730,11 @@ def _main_run(args: argparse.Namespace) -> int:
         try:
             if fan_ctrl:
                 fan_ctrl.stop()
+        except Exception:
+            pass
+        try:
+            if auto_bright is not None:
+                auto_bright.shutdown()
         except Exception:
             pass
         try:

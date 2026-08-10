@@ -102,15 +102,23 @@ class FanCurveController:
         temps,
         get_config: Callable[[], FanCurveConfig],
         on_status: Optional[Callable[[str], None]] = None,
+        get_ec_pin: Optional[Callable[[], tuple]] = None,
+        on_after_fan_write: Optional[Callable[[], None]] = None,
     ) -> None:
         self._synapse = synapse
         self._temps = temps
         self._get_config = get_config
         self._on_status = on_status
+        # (cpu_boost|None, gpu_level|None) re-pinned after each fan HID write.
+        self._get_ec_pin = get_ec_pin
+        self._on_after_fan_write = on_after_fan_write
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_cpu_rpm: Optional[int] = None
         self._last_gpu_rpm: Optional[int] = None
+        self._tick_count = 0
+        # Re-pin EC every N ticks even if RPM unchanged (firmware/Synapse drift).
+        self._repin_every = 2
         self.last_status = "曲线未启动"
         self.last_cpu_c: Optional[float] = None
         self.last_gpu_c: Optional[float] = None
@@ -186,6 +194,7 @@ class FanCurveController:
         cpu_rpm = max(RPM_MIN, min(RPM_MAX, (cpu_rpm // 100) * 100))
         gpu_rpm = max(RPM_MIN, min(RPM_MAX, (gpu_rpm // 100) * 100))
 
+        self._tick_count += 1
         changed = (
             force
             or self._last_cpu_rpm is None
@@ -193,27 +202,71 @@ class FanCurveController:
             or abs(cpu_rpm - self._last_cpu_rpm) >= 100
             or abs(gpu_rpm - self._last_gpu_rpm) >= 100
         )
+        # Steady-state: still re-pin EC so Synapse/firmware cannot silently drop tiers.
+        do_repin = (not changed) and (self._tick_count % max(1, self._repin_every) == 0)
+
+        cpu_pin = None
+        gpu_pin = None
+        if self._get_ec_pin is not None:
+            try:
+                cpu_pin, gpu_pin = self._get_ec_pin()
+            except Exception:
+                cpu_pin, gpu_pin = None, None
+
         if changed:
-            # Per-zone fan writes touch Custom mode and can reset EC CPU boost to low.
+            # Per-zone fan writes enter Custom and reset EC CPU/GPU tiers.
             def _write_fans() -> None:
                 self._synapse.set_max_fan(False)
                 self._synapse.set_fan_rpm_zone(1, cpu_rpm)
                 self._synapse.set_fan_rpm_zone(2, gpu_rpm)
 
-            if hasattr(self._synapse, "preserve_cpu_boost"):
+            if hasattr(self._synapse, "preserve_ec_limits"):
+                self._synapse.preserve_ec_limits(
+                    _write_fans, cpu_boost=cpu_pin, gpu_level=gpu_pin
+                )
+            elif hasattr(self._synapse, "preserve_cpu_boost"):
                 self._synapse.preserve_cpu_boost(_write_fans)
             else:
                 _write_fans()
+
+            if self._on_after_fan_write is not None:
+                try:
+                    self._on_after_fan_write()
+                except Exception:
+                    pass
+
             self._last_cpu_rpm = cpu_rpm
             self._last_gpu_rpm = gpu_rpm
             # Brief settle; avoid readback (wakes Synapse).
             time.sleep(0.05)
+        elif do_repin:
+            self._repin_ec(cpu_pin, gpu_pin)
 
         self.last_cpu_rpm = cpu_rpm
         self.last_gpu_rpm = gpu_rpm
         cpu_note = "自动(可停)" if cpu_rpm <= 0 else f"{cpu_rpm}"
         gpu_note = "自动(可停)" if gpu_rpm <= 0 else f"{gpu_rpm}"
         prefix = "强制写入" if ignore_enabled else "曲线"
-        self._set_status(
+        status = (
             f"{prefix}: CPU {cpu_temp:.0f}°C→{cpu_note}  GPU {gpu_temp:.0f}°C→{gpu_note}"
         )
+        err = getattr(self._synapse, "last_preserve_error", "") or ""
+        if err:
+            status = f"{status} | EC钉住失败: {err}"
+        self._set_status(status)
+
+    def _repin_ec(self, cpu_pin, gpu_pin) -> None:
+        """Lightweight EC tier re-assert without rewriting fan RPM."""
+        try:
+            if cpu_pin is not None:
+                self._synapse.set_cpu_boost(cpu_pin)
+            if gpu_pin is not None:
+                self._synapse.set_gpu_boost(gpu_pin)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"曲线 EC重钉失败: {exc}")
+            return
+        if self._on_after_fan_write is not None:
+            try:
+                self._on_after_fan_write()
+            except Exception:
+                pass

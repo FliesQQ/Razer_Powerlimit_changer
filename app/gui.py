@@ -7,6 +7,8 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import TYPE_CHECKING, Callable, Optional
 
 from . import i18n
+from .auto_bright import AutoBrightConfig
+from .backends.brightness import clamp_brightness
 from .i18n import t
 from .widgets.fan_curve_chart import FanCurveChart
 from .widgets.hotkey_capture import HotkeyCapture
@@ -102,6 +104,26 @@ class AppGUI:
             value=bool(settings.get("enable_undervolt", True))
         )
         self.on_features_changed: Optional[Callable[[], None]] = None
+        self.on_auto_bright_changed: Optional[Callable[[], None]] = None
+        self._auto_bright_ctrl = None
+        self._ab_save_timer = None
+
+        ab0 = AutoBrightConfig.from_dict(settings.get("auto_bright"))
+        self.ab_enabled = tk.BooleanVar(value=bool(ab0.enabled))
+        self.ab_oled = tk.BooleanVar(value=bool(ab0.oled_mode))
+        self.ab_lock = tk.BooleanVar(value=bool(ab0.brightness_lock))
+        self.ab_plug = tk.IntVar(value=int(ab0.plug_bright))
+        self.ab_bat = tk.IntVar(value=int(ab0.bat_bright))
+        self.ab_lock_mode = tk.StringVar(value=ab0.lock_mode)
+        self.ab_lock_probe = tk.StringVar(value=ab0.lock_probe_profile)
+        self.ab_lock_delay = tk.StringVar(value=str(ab0.lock_delay_sec))
+        self.ab_power_var = tk.StringVar(value=t("bright_power", state="—"))
+        self.ab_status_var = tk.StringVar(
+            value=t("bright_status", msg=t("bright_status_idle"))
+        )
+        self.ab_mode_var = tk.StringVar(
+            value=t("bright_mode", mode=t("bright_mode_native"))
+        )
 
         self._build()
         self.refresh_list()
@@ -200,10 +222,12 @@ class AppGUI:
         tab_curve_outer = ttk.Frame(self._nb)
         tab_osd = ttk.Frame(self._nb, padding=6)
         tab_tray = ttk.Frame(self._nb, padding=6)
+        tab_bright_outer = ttk.Frame(self._nb)
         self._nb.add(tab_main, text=t("tab_home"))
         self._nb.add(tab_curve_outer, text=t("tab_fan"))
         self._nb.add(tab_osd, text=t("tab_osd"))
         self._nb.add(tab_tray, text=t("tab_tray"))
+        self._nb.add(tab_bright_outer, text=t("tab_bright"))
 
         curve_canvas = tk.Canvas(tab_curve_outer, highlightthickness=0)
         style_canvas(curve_canvas)
@@ -533,6 +557,7 @@ class AppGUI:
         )
         self._lbl_autostart_hint.pack(anchor=tk.W, pady=(4, 0))
 
+        self._build_auto_bright_tab(tab_bright_outer)
         self._sync_fan_mutex_ui()
 
     def _sync_fan_mutex_ui(self) -> None:
@@ -546,6 +571,461 @@ class AppGUI:
         hint = getattr(self, "fan_mutex_hint", None)
         if hint is not None:
             hint.configure(text=t("fan_mutex") if curve_on else "")
+
+    def _build_auto_bright_tab(self, outer: ttk.Frame) -> None:
+        from .theme import style_canvas
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        style_canvas(canvas)
+        vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tab = ttk.Frame(canvas, padding=8)
+        win = canvas.create_window((0, 0), window=tab, anchor="nw")
+
+        def _on_frame_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event) -> None:
+            canvas.itemconfigure(win, width=event.width)
+
+        def _on_mousewheel(event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        tab.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+        self._chk_ab_enable = ttk.Checkbutton(
+            tab,
+            text=t("bright_enable"),
+            variable=self.ab_enabled,
+            command=self._on_ab_enable_toggle,
+        )
+        self._chk_ab_enable.pack(anchor=tk.W)
+        self._lbl_ab_hint = ttk.Label(tab, text=t("bright_hint"), wraplength=640)
+        self._lbl_ab_hint.pack(anchor=tk.W, pady=(4, 10))
+
+        self._lbl_ab_power = ttk.Label(tab, textvariable=self.ab_power_var)
+        self._lbl_ab_power.pack(anchor=tk.W)
+        self._lbl_ab_status = ttk.Label(
+            tab, textvariable=self.ab_status_var, wraplength=640
+        )
+        self._lbl_ab_status.pack(anchor=tk.W, pady=(2, 0))
+        self._lbl_ab_mode = ttk.Label(tab, textvariable=self.ab_mode_var)
+        self._lbl_ab_mode.pack(anchor=tk.W, pady=(2, 10))
+
+        self._chk_ab_oled = ttk.Checkbutton(
+            tab,
+            text=t("bright_oled"),
+            variable=self.ab_oled,
+            command=self._on_ab_oled_toggle,
+        )
+        self._chk_ab_oled.pack(anchor=tk.W)
+        self._chk_ab_lock = ttk.Checkbutton(
+            tab,
+            text=t("bright_lock"),
+            variable=self.ab_lock,
+            command=self._on_ab_lock_toggle,
+        )
+        self._chk_ab_lock.pack(anchor=tk.W, pady=(4, 8))
+
+        row_mode = ttk.Frame(tab)
+        row_mode.pack(fill=tk.X, pady=2)
+        self._lbl_ab_lock_mode = ttk.Label(row_mode, text=t("bright_lock_mode"), width=14)
+        self._lbl_ab_lock_mode.pack(side=tk.LEFT)
+        self._ab_lock_mode_cb = ttk.Combobox(
+            row_mode,
+            state="readonly",
+            width=36,
+            values=[t("bright_lock_delay_restore"), t("bright_lock_until_power")],
+        )
+        self._ab_lock_mode_cb.pack(side=tk.LEFT, padx=(6, 0))
+        self._ab_lock_mode_cb.bind("<<ComboboxSelected>>", self._on_ab_lock_mode_combo)
+
+        row_delay = ttk.Frame(tab)
+        row_delay.pack(fill=tk.X, pady=2)
+        self._lbl_ab_lock_delay = ttk.Label(
+            row_delay, text=t("bright_lock_delay"), width=14
+        )
+        self._lbl_ab_lock_delay.pack(side=tk.LEFT)
+        self._ent_ab_lock_delay = ttk.Entry(
+            row_delay, width=8, textvariable=self.ab_lock_delay, justify=tk.CENTER
+        )
+        self._ent_ab_lock_delay.pack(side=tk.LEFT, padx=(6, 0))
+        self._ent_ab_lock_delay.bind("<Return>", self._on_ab_lock_delay_entry)
+        self._ent_ab_lock_delay.bind("<FocusOut>", self._on_ab_lock_delay_entry)
+
+        row_probe = ttk.Frame(tab)
+        row_probe.pack(fill=tk.X, pady=(2, 10))
+        self._lbl_ab_lock_probe = ttk.Label(
+            row_probe, text=t("bright_lock_probe"), width=14
+        )
+        self._lbl_ab_lock_probe.pack(side=tk.LEFT)
+        self._ab_lock_probe_cb = ttk.Combobox(
+            row_probe,
+            state="readonly",
+            width=16,
+            values=[
+                t("bright_probe_eco"),
+                t("bright_probe_balanced"),
+                t("bright_probe_sensitive"),
+            ],
+        )
+        self._ab_lock_probe_cb.pack(side=tk.LEFT, padx=(6, 0))
+        self._ab_lock_probe_cb.bind("<<ComboboxSelected>>", self._on_ab_lock_probe_combo)
+        self._sync_ab_lock_ui()
+
+        row_plug = ttk.Frame(tab)
+        row_plug.pack(fill=tk.X, pady=4)
+        self._lbl_ab_plug = ttk.Label(row_plug, text=t("bright_plug"), width=14)
+        self._lbl_ab_plug.pack(side=tk.LEFT)
+        from .theme import COLORS as _c
+
+        self._scl_ab_plug = tk.Scale(
+            row_plug,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            showvalue=False,
+            resolution=1,
+            length=280,
+            sliderlength=24,
+            width=16,
+            bd=0,
+            highlightthickness=0,
+            relief=tk.FLAT,
+            sliderrelief=tk.RAISED,
+            troughcolor=_c["surface2"],
+            bg=_c["bg"],
+            fg=_c["accent"],
+            activebackground=_c["accent"],
+            highlightbackground=_c["bg"],
+            command=self._on_ab_plug_scale,
+        )
+        self._scl_ab_plug.set(self.ab_plug.get())
+        self._scl_ab_plug.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        self._ent_ab_plug = ttk.Entry(row_plug, width=5, justify=tk.CENTER)
+        self._ent_ab_plug.insert(0, str(self.ab_plug.get()))
+        self._ent_ab_plug.pack(side=tk.LEFT)
+        self._ent_ab_plug.bind("<Return>", self._on_ab_plug_entry)
+        self._ent_ab_plug.bind("<FocusOut>", self._on_ab_plug_entry)
+
+        row_bat = ttk.Frame(tab)
+        row_bat.pack(fill=tk.X, pady=4)
+        self._lbl_ab_bat = ttk.Label(row_bat, text=t("bright_bat_level"), width=14)
+        self._lbl_ab_bat.pack(side=tk.LEFT)
+        self._scl_ab_bat = tk.Scale(
+            row_bat,
+            from_=0,
+            to=100,
+            orient=tk.HORIZONTAL,
+            showvalue=False,
+            resolution=1,
+            length=280,
+            sliderlength=24,
+            width=16,
+            bd=0,
+            highlightthickness=0,
+            relief=tk.FLAT,
+            sliderrelief=tk.RAISED,
+            troughcolor=_c["surface2"],
+            bg=_c["bg"],
+            fg=_c["accent"],
+            activebackground=_c["accent"],
+            highlightbackground=_c["bg"],
+            command=self._on_ab_bat_scale,
+        )
+        self._scl_ab_bat.set(self.ab_bat.get())
+        self._scl_ab_bat.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        self._ent_ab_bat = ttk.Entry(row_bat, width=5, justify=tk.CENTER)
+        self._ent_ab_bat.insert(0, str(self.ab_bat.get()))
+        self._ent_ab_bat.pack(side=tk.LEFT)
+        self._ent_ab_bat.bind("<Return>", self._on_ab_bat_entry)
+        self._ent_ab_bat.bind("<FocusOut>", self._on_ab_bat_entry)
+
+        btns = ttk.Frame(tab)
+        btns.pack(fill=tk.X, pady=(14, 6))
+        self._btn_ab_apply = ttk.Button(
+            btns,
+            text=t("bright_apply"),
+            style="Accent.TButton",
+            command=self._on_ab_apply,
+        )
+        self._btn_ab_apply.pack(side=tk.LEFT, padx=(0, 8))
+        self._btn_ab_save = ttk.Button(
+            btns, text=t("bright_save"), command=self._on_ab_save
+        )
+        self._btn_ab_save.pack(side=tk.LEFT)
+
+        self._lbl_ab_poll_hint = ttk.Label(
+            tab, text=t("bright_poll_hint"), wraplength=640
+        )
+        self._lbl_ab_poll_hint.pack(anchor=tk.W, pady=(8, 4))
+
+    def bind_auto_bright_controller(self, ctrl) -> None:
+        self._auto_bright_ctrl = ctrl
+        if ctrl is not None:
+            try:
+                self.update_auto_bright_status(ctrl.status_snapshot())
+            except Exception:
+                pass
+
+    def collect_auto_bright_config(self) -> AutoBrightConfig:
+        prev = AutoBrightConfig.from_dict(
+            (getattr(self.manager, "settings", {}) or {}).get("auto_bright")
+        )
+        oled = bool(self.ab_oled.get())
+        plug = clamp_brightness(int(self.ab_plug.get()), oled)
+        bat = clamp_brightness(int(self.ab_bat.get()), oled)
+        try:
+            delay = max(1, min(120, int(str(self.ab_lock_delay.get()).strip())))
+        except ValueError:
+            delay = prev.lock_delay_sec
+        lock_mode = self.ab_lock_mode.get()
+        if lock_mode not in {"delay_restore", "until_power_change"}:
+            lock_mode = "delay_restore"
+        probe = self.ab_lock_probe.get()
+        if probe not in {"eco", "balanced", "sensitive"}:
+            probe = "balanced"
+        return AutoBrightConfig(
+            enabled=bool(self.ab_enabled.get()),
+            plug_bright=plug,
+            bat_bright=bat,
+            applied_plug_bright=prev.applied_plug_bright,
+            applied_bat_bright=prev.applied_bat_bright,
+            poll_ms=prev.poll_ms,
+            oled_mode=oled,
+            brightness_lock=bool(self.ab_lock.get()),
+            lock_mode=lock_mode,
+            lock_delay_sec=delay,
+            lock_probe_profile=probe,
+            prefer_compat_backend=prev.prefer_compat_backend,
+        ).normalized()
+
+    def _persist_auto_bright(
+        self, cfg: AutoBrightConfig, *, notify: bool = True
+    ) -> None:
+        self.manager.update_settings(auto_bright=cfg.to_dict())
+        if notify:
+            cb = getattr(self, "on_auto_bright_changed", None)
+            if cb:
+                try:
+                    cb()
+                except Exception:
+                    pass
+
+    def _schedule_ab_save(self) -> None:
+        if self._ab_save_timer is not None:
+            try:
+                self.root.after_cancel(self._ab_save_timer)
+            except Exception:
+                pass
+        self._ab_save_timer = self.root.after(400, self._do_ab_save)
+
+    def _do_ab_save(self) -> None:
+        self._ab_save_timer = None
+        cfg = self.collect_auto_bright_config()
+        self._persist_auto_bright(cfg, notify=True)
+
+    def _set_ab_status_text(self, msg: str, *, ok: Optional[bool] = True) -> None:
+        self.ab_status_var.set(t("bright_status", msg=msg))
+        _ = ok  # reserved for future color styling
+
+    def update_auto_bright_status(self, snap: dict) -> None:
+        ac = bool(snap.get("ac"))
+        state = t("bright_ac") if ac else t("bright_bat")
+        self.ab_power_var.set(t("bright_power", state=state))
+        mode_key = (
+            "bright_mode_compat"
+            if snap.get("mode") == "compat"
+            else "bright_mode_native"
+        )
+        self.ab_mode_var.set(t("bright_mode", mode=t(mode_key)))
+        raw = str(snap.get("message") or "")
+        if not raw:
+            msg = t("bright_status_idle")
+        elif raw == "lock_hold":
+            msg = t("bright_lock_hold_msg")
+        elif raw.startswith("lock_restore:"):
+            parts = raw.split(":")
+            try:
+                sec, pct = int(parts[1]), int(parts[2])
+            except (IndexError, ValueError):
+                msg = raw
+            else:
+                msg = t("bright_lock_restore_msg", sec=sec, pct=pct)
+        else:
+            msg = raw
+        self.ab_status_var.set(t("bright_status", msg=msg))
+
+    def _sync_ab_lock_ui(self) -> None:
+        mode = self.ab_lock_mode.get()
+        text = (
+            t("bright_lock_until_power")
+            if mode == "until_power_change"
+            else t("bright_lock_delay_restore")
+        )
+        try:
+            self._ab_lock_mode_cb.set(text)
+        except Exception:
+            pass
+        probe = self.ab_lock_probe.get()
+        probe_map = {
+            "eco": t("bright_probe_eco"),
+            "sensitive": t("bright_probe_sensitive"),
+            "balanced": t("bright_probe_balanced"),
+        }
+        try:
+            self._ab_lock_probe_cb.set(probe_map.get(probe, t("bright_probe_balanced")))
+        except Exception:
+            pass
+        delay_state = tk.NORMAL if mode == "delay_restore" else tk.DISABLED
+        try:
+            self._ent_ab_lock_delay.configure(state=delay_state)
+        except Exception:
+            pass
+
+    def _entry_set_ab(self, entry: ttk.Entry, val: int) -> None:
+        entry.delete(0, tk.END)
+        entry.insert(0, str(int(val)))
+
+    def _on_ab_enable_toggle(self) -> None:
+        self._do_ab_save()
+        on = bool(self.ab_enabled.get())
+        self._set_ab_status_text(
+            f"{t('bright_enable')} → {t('on') if on else t('off')}"
+        )
+        ctrl = self._auto_bright_ctrl
+        if on and ctrl is not None:
+            try:
+                # Re-enable must re-apply even if AC line status did not change.
+                ctrl.notify_resume()
+            except Exception:
+                pass
+
+    def _on_ab_oled_toggle(self) -> None:
+        oled = bool(self.ab_oled.get())
+        for var, scale, entry in (
+            (self.ab_plug, self._scl_ab_plug, self._ent_ab_plug),
+            (self.ab_bat, self._scl_ab_bat, self._ent_ab_bat),
+        ):
+            v = clamp_brightness(int(var.get()), oled)
+            var.set(v)
+            scale.set(v)
+            self._entry_set_ab(entry, v)
+        self._set_ab_status_text(t("bright_oled_updated"))
+        self._schedule_ab_save()
+
+    def _on_ab_lock_toggle(self) -> None:
+        self._set_ab_status_text(
+            t("bright_lock_on") if self.ab_lock.get() else t("bright_lock_off")
+        )
+        self._schedule_ab_save()
+
+    def _on_ab_lock_mode_combo(self, _event=None) -> None:
+        text = self._ab_lock_mode_cb.get()
+        if text == t("bright_lock_until_power"):
+            self.ab_lock_mode.set("until_power_change")
+        else:
+            self.ab_lock_mode.set("delay_restore")
+        self._sync_ab_lock_ui()
+        self._set_ab_status_text(t("bright_lock_policy_updated"))
+        self._schedule_ab_save()
+
+    def _on_ab_lock_probe_combo(self, _event=None) -> None:
+        text = self._ab_lock_probe_cb.get()
+        if text == t("bright_probe_eco"):
+            self.ab_lock_probe.set("eco")
+        elif text == t("bright_probe_sensitive"):
+            self.ab_lock_probe.set("sensitive")
+        else:
+            self.ab_lock_probe.set("balanced")
+        self._set_ab_status_text(t("bright_lock_probe_updated"))
+        self._schedule_ab_save()
+
+    def _on_ab_lock_delay_entry(self, _event=None) -> None:
+        try:
+            v = max(1, min(120, int(str(self.ab_lock_delay.get()).strip())))
+        except ValueError:
+            v = 5
+        self.ab_lock_delay.set(str(v))
+        self._set_ab_status_text(t("bright_lock_delay_set", sec=v))
+        self._schedule_ab_save()
+
+    def _on_ab_plug_scale(self, _v=None) -> None:
+        try:
+            raw = int(round(float(self._scl_ab_plug.get())))
+        except Exception:
+            raw = int(self.ab_plug.get())
+        v = clamp_brightness(raw, bool(self.ab_oled.get()))
+        self.ab_plug.set(v)
+        if abs(float(self._scl_ab_plug.get()) - v) > 0.5:
+            self._scl_ab_plug.set(v)
+        self._entry_set_ab(self._ent_ab_plug, v)
+        self._set_ab_status_text(t("bright_pending"))
+        self._schedule_ab_save()
+
+    def _on_ab_bat_scale(self, _v=None) -> None:
+        try:
+            raw = int(round(float(self._scl_ab_bat.get())))
+        except Exception:
+            raw = int(self.ab_bat.get())
+        v = clamp_brightness(raw, bool(self.ab_oled.get()))
+        self.ab_bat.set(v)
+        if abs(float(self._scl_ab_bat.get()) - v) > 0.5:
+            self._scl_ab_bat.set(v)
+        self._entry_set_ab(self._ent_ab_bat, v)
+        self._set_ab_status_text(t("bright_pending"))
+        self._schedule_ab_save()
+
+    def _on_ab_plug_entry(self, _event=None) -> None:
+        try:
+            v = clamp_brightness(
+                int(self._ent_ab_plug.get().strip()), bool(self.ab_oled.get())
+            )
+        except ValueError:
+            v = int(self.ab_plug.get())
+        self.ab_plug.set(v)
+        self._scl_ab_plug.set(v)
+        self._entry_set_ab(self._ent_ab_plug, v)
+        self._set_ab_status_text(t("bright_pending"))
+        self._schedule_ab_save()
+
+    def _on_ab_bat_entry(self, _event=None) -> None:
+        try:
+            v = clamp_brightness(
+                int(self._ent_ab_bat.get().strip()), bool(self.ab_oled.get())
+            )
+        except ValueError:
+            v = int(self.ab_bat.get())
+        self.ab_bat.set(v)
+        self._scl_ab_bat.set(v)
+        self._entry_set_ab(self._ent_ab_bat, v)
+        self._set_ab_status_text(t("bright_pending"))
+        self._schedule_ab_save()
+
+    def _on_ab_apply(self) -> None:
+        cfg = self.collect_auto_bright_config()
+        cfg.applied_plug_bright = cfg.plug_bright
+        cfg.applied_bat_bright = cfg.bat_bright
+        self._persist_auto_bright(cfg, notify=True)
+        ctrl = self._auto_bright_ctrl
+        if ctrl is not None:
+            try:
+                ctrl.apply_now(commit_sliders=False)
+            except Exception as exc:
+                self._set_ab_status_text(str(exc), ok=False)
+                return
+        self._set_status(t("bright_apply"))
+
+    def _on_ab_save(self) -> None:
+        cfg = self.collect_auto_bright_config()
+        self._persist_auto_bright(cfg, notify=True)
+        self._set_ab_status_text(t("bright_saved"))
+        self._set_status(t("bright_saved"))
 
     def _on_lang_change(self) -> None:
         lang = self.lang_var.get()
@@ -619,6 +1099,18 @@ class AppGUI:
             ("_lbl_startup", "startup"),
             ("_chk_autostart", "autostart"),
             ("_lbl_autostart_hint", "autostart_hint"),
+            ("_chk_ab_enable", "bright_enable"),
+            ("_lbl_ab_hint", "bright_hint"),
+            ("_chk_ab_oled", "bright_oled"),
+            ("_chk_ab_lock", "bright_lock"),
+            ("_lbl_ab_lock_mode", "bright_lock_mode"),
+            ("_lbl_ab_lock_delay", "bright_lock_delay"),
+            ("_lbl_ab_lock_probe", "bright_lock_probe"),
+            ("_lbl_ab_plug", "bright_plug"),
+            ("_lbl_ab_bat", "bright_bat_level"),
+            ("_btn_ab_apply", "bright_apply"),
+            ("_btn_ab_save", "bright_save"),
+            ("_lbl_ab_poll_hint", "bright_poll_hint"),
         ]
         for attr, key in pairs:
             w = getattr(self, attr, None)
@@ -634,8 +1126,28 @@ class AppGUI:
                 nb.tab(1, text=t("tab_fan"))
                 nb.tab(2, text=t("tab_osd"))
                 nb.tab(3, text=t("tab_tray"))
+                nb.tab(4, text=t("tab_bright"))
             except Exception:
                 pass
+        try:
+            if hasattr(self, "_ab_lock_mode_cb"):
+                self._ab_lock_mode_cb.configure(
+                    values=[t("bright_lock_delay_restore"), t("bright_lock_until_power")]
+                )
+            if hasattr(self, "_ab_lock_probe_cb"):
+                self._ab_lock_probe_cb.configure(
+                    values=[
+                        t("bright_probe_eco"),
+                        t("bright_probe_balanced"),
+                        t("bright_probe_sensitive"),
+                    ]
+                )
+            self._sync_ab_lock_ui()
+            ctrl = self._auto_bright_ctrl
+            if ctrl is not None:
+                self.update_auto_bright_status(ctrl.status_snapshot())
+        except Exception:
+            pass
         for rb, (text, _val) in zip(
             getattr(self, "_cpu_radios", []), i18n.cpu_level_labels()
         ):

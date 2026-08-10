@@ -23,6 +23,90 @@ STRINGS: dict[str, dict[str, str]] = {
     "tab_fan": {"zh": "风扇曲线", "en": "Fan curves"},
     "tab_osd": {"zh": "桌面 OSD", "en": "Desktop OSD"},
     "tab_tray": {"zh": "托盘图标", "en": "Tray icons"},
+    "tab_bright": {"zh": "自动亮度", "en": "Auto brightness"},
+    "bright_enable": {
+        "zh": "启用按供电自动调节亮度（插电 / 电池）",
+        "en": "Enable auto brightness by power source (AC / battery)",
+    },
+    "bright_hint": {
+        "zh": "休眠/睡眠唤醒后会自动校正。开机自启与托盘请用「托盘图标」页，无需单独安装 AutoBright。",
+        "en": "Re-applies after sleep/hibernate. Use the Tray tab for autostart — no separate AutoBright app needed.",
+    },
+    "bright_power": {"zh": "供电：{state}", "en": "Power: {state}"},
+    "bright_ac": {"zh": "交流电", "en": "AC"},
+    "bright_bat": {"zh": "电池", "en": "Battery"},
+    "bright_status": {"zh": "亮度状态：{msg}", "en": "Brightness: {msg}"},
+    "bright_status_idle": {"zh": "待执行", "en": "Idle"},
+    "bright_mode": {"zh": "运行模式：{mode}", "en": "Backend: {mode}"},
+    "bright_mode_native": {
+        "zh": "原生模式（dxva2）",
+        "en": "Native (dxva2)",
+    },
+    "bright_mode_compat": {
+        "zh": "兼容模式（PowerShell/WMI）",
+        "en": "Compat (PowerShell/WMI)",
+    },
+    "bright_oled": {
+        "zh": "OLED 模式（亮度最低 60%）",
+        "en": "OLED mode (min brightness 60%)",
+    },
+    "bright_lock": {"zh": "亮度锁定", "en": "Brightness lock"},
+    "bright_lock_mode": {"zh": "锁定策略", "en": "Lock policy"},
+    "bright_lock_delay_restore": {
+        "zh": "手动改动后延时恢复",
+        "en": "Restore after delay if changed manually",
+    },
+    "bright_lock_until_power": {
+        "zh": "保持手动值直到电源变化",
+        "en": "Keep manual value until power source changes",
+    },
+    "bright_lock_delay": {"zh": "恢复延时(秒)", "en": "Restore delay (s)"},
+    "bright_lock_probe": {"zh": "锁定检测频率", "en": "Lock probe rate"},
+    "bright_probe_eco": {"zh": "省电优先", "en": "Eco"},
+    "bright_probe_balanced": {"zh": "平衡", "en": "Balanced"},
+    "bright_probe_sensitive": {"zh": "灵敏", "en": "Sensitive"},
+    "bright_plug": {"zh": "插电时亮度", "en": "AC brightness"},
+    "bright_bat_level": {"zh": "电池时亮度", "en": "Battery brightness"},
+    "bright_apply": {
+        "zh": "立即按当前供电应用",
+        "en": "Apply for current power source",
+    },
+    "bright_save": {"zh": "保存设置", "en": "Save settings"},
+    "bright_saved": {"zh": "自动亮度设置已保存", "en": "Auto-brightness settings saved"},
+    "bright_pending": {
+        "zh": "参数已更新，点击「立即按当前供电应用」后生效",
+        "en": "Updated — click Apply to take effect",
+    },
+    "bright_oled_updated": {
+        "zh": "OLED 模式已更新；点击「立即按当前供电应用」后生效",
+        "en": "OLED mode updated — click Apply to take effect",
+    },
+    "bright_lock_on": {"zh": "亮度锁定已开启", "en": "Brightness lock on"},
+    "bright_lock_off": {"zh": "亮度锁定已关闭", "en": "Brightness lock off"},
+    "bright_lock_policy_updated": {
+        "zh": "亮度锁定策略已更新",
+        "en": "Lock policy updated",
+    },
+    "bright_lock_probe_updated": {
+        "zh": "锁定检测频率已更新",
+        "en": "Lock probe rate updated",
+    },
+    "bright_lock_delay_set": {
+        "zh": "恢复延时已设为 {sec} 秒",
+        "en": "Restore delay set to {sec}s",
+    },
+    "bright_lock_hold_msg": {
+        "zh": "检测到手动亮度改动，将保持到下次电源状态变化后恢复",
+        "en": "Manual brightness change detected — keep until power source changes",
+    },
+    "bright_lock_restore_msg": {
+        "zh": "检测到亮度被手动改动，已在 {sec} 秒后恢复为 {pct}%",
+        "en": "Manual change detected — restored to {pct}% after {sec}s",
+    },
+    "bright_poll_hint": {
+        "zh": "提示：轮询可捕捉休眠、睡眠唤醒后的状态变化。亮度锁定在「平衡」下约每 30 秒读一次亮度（原生 API 几乎无感；兼容模式会稍重）。",
+        "en": "Polling catches sleep/hibernate resets. Brightness lock (Balanced) reads ~every 30s — native API is negligible; compat/WMI is heavier.",
+    },
     "features": {"zh": "功能模块（可独立开关）", "en": "Feature modules (independent)"},
     "feat_cpu": {
         "zh": "CPU 档位（低/中/高/增强/自定义）",
@@ -235,6 +319,23 @@ STRINGS: dict[str, dict[str, str]] = {
     "osd_items": {"zh": "显示项", "en": "Items"},
     "osd_colors": {"zh": "颜色", "en": "Colors"},
     "osd_title": {"zh": "桌面性能 OSD", "en": "Desktop performance OSD"},
+    "osd_menu_lock_on": {
+        "zh": "✓ 锁定位置（当前：已锁定）",
+        "en": "✓ Lock position (now: locked)",
+    },
+    "osd_menu_lock_off": {
+        "zh": "锁定位置（当前：未锁定）",
+        "en": "Lock position (now: unlocked)",
+    },
+    "osd_menu_top_on": {
+        "zh": "✓ 最前端显示（当前：已开启）",
+        "en": "✓ Always on top (now: on)",
+    },
+    "osd_menu_top_off": {
+        "zh": "最前端显示（当前：已关闭）",
+        "en": "Always on top (now: off)",
+    },
+    "osd_menu_hide": {"zh": "隐藏 OSD", "en": "Hide OSD"},
     # Live / status values
     "cached": {"zh": "(缓存)", "en": "(cached)"},
     "read_fail": {"zh": "读失败", "en": "Read failed"},

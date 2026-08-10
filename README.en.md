@@ -18,6 +18,7 @@ In the app, switch language with **UI language → 中文 / English** on the Hom
 | **GPU tier** | Synapse-like Low / Med / High (HID) | On |
 | **CPU undervolt** | Core / Cache / E-Cache (MSR 0x150), independent of tier | On |
 | **Fan curves** | Dual-zone RPM from CPU/GPU temps (mutex with profile fans) | Off (enable on tab) |
+| **Auto brightness** | AC vs battery brightness; optional lock / OLED floor | Off (enable on tab) |
 | **Hotkeys / tray / OSD** | Global hotkeys, tray, optional desktop overlay | — |
 | **Autostart** | Silent tray after login; re-apply last profile / undervolt | Optional |
 | **Resume restore** | Re-assert undervolt (and power if Custom) after sleep/hibernate | Auto |

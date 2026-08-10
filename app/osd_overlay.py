@@ -140,7 +140,7 @@ class PerformanceOsd:
         self._drag = {"x": 0, "y": 0}
         self._last: Optional[OsdSnapshot] = None
         self._built_sig: Optional[tuple] = None
-        self._ctx_menu: Optional[tk.Menu] = None
+        self._ctx_menu: Optional[tk.Misc] = None
 
     @property
     def visible(self) -> bool:
@@ -167,6 +167,7 @@ class PerformanceOsd:
         self.apply_config(cfg)
 
     def hide(self) -> None:
+        self._dismiss_ctx_menu()
         if self._win is not None:
             try:
                 cfg = self._get_config()
@@ -285,30 +286,116 @@ class PerformanceOsd:
             self._bind_drag(lab)
         self._bind_drag(frame)
         self._bind_drag(self._win)
-        self._ctx_menu = tk.Menu(self._win, tearoff=0)
         for w in (self._win, frame, *self._labels.values()):
             w.bind("<Button-3>", self._popup_menu)
 
     def _popup_menu(self, event) -> None:
-        """Rebuild menu each time so lock/topmost state is visible."""
+        """Custom popup (Tk Menu is unreliable on overrideredirect + topmost)."""
         if self._win is None:
             return
+        from app.i18n import t
+
+        self._dismiss_ctx_menu()
         cfg = self._get_config()
-        menu = tk.Menu(self._win, tearoff=0)
-        if cfg.locked:
-            menu.add_command(label="✓ 锁定位置（当前：已锁定）", command=self._toggle_lock)
-        else:
-            menu.add_command(label="锁定位置（当前：未锁定）", command=self._toggle_lock)
-        if cfg.topmost:
-            menu.add_command(label="✓ 最前端显示（当前：已开启）", command=self._toggle_topmost)
-        else:
-            menu.add_command(label="最前端显示（当前：已关闭）", command=self._toggle_topmost)
-        menu.add_separator()
-        menu.add_command(label="隐藏 OSD", command=self._disable)
+
+        pop = tk.Toplevel(self._win)
+        pop.withdraw()
+        pop.overrideredirect(True)
         try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+            pop.attributes("-topmost", True)
+        except Exception:
+            pass
+        pop.configure(bg="#2a2a2a", highlightthickness=1, highlightbackground="#555555")
+        self._ctx_menu = pop
+
+        def add_item(text: str, fn) -> None:
+            lab = tk.Label(
+                pop,
+                text=text,
+                anchor="w",
+                padx=14,
+                pady=6,
+                bg="#2a2a2a",
+                fg="#f0f0f0",
+                font=("Segoe UI", 9),
+            )
+            lab.pack(fill=tk.X)
+
+            def on_enter(_e, w=lab):
+                w.configure(bg="#3a6a5a", fg="#ffffff")
+
+            def on_leave(_e, w=lab):
+                w.configure(bg="#2a2a2a", fg="#f0f0f0")
+
+            def on_click(_e, action=fn):
+                self._dismiss_ctx_menu()
+                try:
+                    action()
+                except Exception:
+                    pass
+                return "break"
+
+            lab.bind("<Enter>", on_enter)
+            lab.bind("<Leave>", on_leave)
+            lab.bind("<Button-1>", on_click)
+
+        add_item(
+            t("osd_menu_lock_on") if cfg.locked else t("osd_menu_lock_off"),
+            self._toggle_lock,
+        )
+        add_item(
+            t("osd_menu_top_on") if cfg.topmost else t("osd_menu_top_off"),
+            self._toggle_topmost,
+        )
+        sep = tk.Frame(pop, height=1, bg="#555555")
+        sep.pack(fill=tk.X, padx=4, pady=2)
+        add_item(t("osd_menu_hide"), self._disable)
+
+        pop.update_idletasks()
+        w = max(pop.winfo_reqwidth(), 200)
+        h = pop.winfo_reqheight()
+        x, y = int(event.x_root), int(event.y_root)
+        # Keep popup on-screen.
+        try:
+            sw = int(pop.winfo_screenwidth())
+            sh = int(pop.winfo_screenheight())
+            x = min(max(0, x), max(0, sw - w - 4))
+            y = min(max(0, y), max(0, sh - h - 4))
+        except Exception:
+            pass
+        pop.geometry(f"{w}x{h}+{x}+{y}")
+        pop.deiconify()
+        pop.lift()
+        try:
+            pop.focus_force()
+            pop.grab_set()
+        except Exception:
+            pass
+
+        pop.bind("<Escape>", lambda _e: self._dismiss_ctx_menu())
+
+        def _outside_click(e) -> None:
+            # Clicks on menu items are handled by labels; anything else closes.
+            if e.widget is pop or e.widget is sep:
+                self._dismiss_ctx_menu()
+
+        pop.bind("<Button-1>", _outside_click)
+
+    def _dismiss_ctx_menu(self) -> None:
+        pop = self._ctx_menu
+        self._ctx_menu = None
+        if pop is None:
+            return
+        try:
+            pop.grab_release()
+        except Exception:
+            pass
+        try:
+            if isinstance(pop, tk.Menu):
+                pop.unpost()
+            pop.destroy()
+        except Exception:
+            pass
 
     def _style_labels(self, cfg: OsdConfig) -> None:
         bg = cfg.colors.get("background", "#101010")

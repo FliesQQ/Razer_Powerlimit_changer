@@ -170,6 +170,48 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
         darkcolor=c["border"],
         padding=4,
     )
+    style.map(
+        "TEntry",
+        fieldbackground=[("disabled", c["surface2"]), ("readonly", c["input_bg"])],
+        foreground=[("disabled", c["muted"])],
+    )
+    style.configure(
+        "TCombobox",
+        fieldbackground=c["input_bg"],
+        background=c["surface2"],
+        foreground=c["text"],
+        arrowcolor=c["text"],
+        bordercolor=c["border"],
+        lightcolor=c["border"],
+        darkcolor=c["border"],
+        insertcolor=c["text"],
+        padding=4,
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[
+            ("readonly", c["input_bg"]),
+            ("disabled", c["surface2"]),
+        ],
+        foreground=[
+            ("readonly", c["text"]),
+            ("disabled", c["muted"]),
+        ],
+        background=[
+            ("active", c["border"]),
+            ("readonly", c["surface2"]),
+        ],
+        arrowcolor=[("disabled", c["muted"])],
+        selectbackground=[("readonly", c["list_sel"])],
+        selectforeground=[("readonly", c["accent"])],
+    )
+    # Dropdown list (Windows popdown is a Listbox, not fully covered by Style).
+    root.option_add("*TCombobox*Listbox.background", c["input_bg"])
+    root.option_add("*TCombobox*Listbox.foreground", c["text"])
+    root.option_add("*TCombobox*Listbox.selectBackground", c["list_sel"])
+    root.option_add("*TCombobox*Listbox.selectForeground", c["accent"])
+    root.option_add("*TCombobox*Listbox.font", font_ui)
+
     style.configure(
         "TSpinbox",
         fieldbackground=c["input_bg"],
@@ -178,6 +220,28 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
         bordercolor=c["border"],
         arrowcolor=c["text"],
         padding=2,
+    )
+
+    style.configure(
+        "Horizontal.TScale",
+        background=c["bg"],
+        troughcolor=c["surface2"],
+        bordercolor=c["border"],
+        lightcolor=c["accent"],
+        darkcolor=c["accent_dim"],
+        sliderthickness=18,
+    )
+    style.map(
+        "Horizontal.TScale",
+        background=[("active", c["bg"])],
+    )
+    style.configure(
+        "Vertical.TScale",
+        background=c["bg"],
+        troughcolor=c["surface2"],
+        bordercolor=c["border"],
+        lightcolor=c["accent"],
+        darkcolor=c["accent_dim"],
     )
 
     style.configure("TNotebook", background=c["bg"], borderwidth=0, tabmargins=(4, 4, 4, 0))
@@ -198,6 +262,13 @@ def apply_theme(root: tk.Tk) -> ttk.Style:
     style.configure("TSeparator", background=c["border"])
     style.configure(
         "Vertical.TScrollbar",
+        background=c["surface2"],
+        troughcolor=c["bg"],
+        bordercolor=c["border"],
+        arrowcolor=c["muted"],
+    )
+    style.configure(
+        "Horizontal.TScrollbar",
         background=c["surface2"],
         troughcolor=c["bg"],
         bordercolor=c["border"],

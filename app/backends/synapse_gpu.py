@@ -131,6 +131,8 @@ class SynapseGpuBackend:
         self._io_lock = threading.RLock()
         self._last_cpu_boost: Optional[CpuBoost] = None
         self._last_gpu_boost: Optional[GpuLevel] = None
+        self.last_preserve_error: str = ""
+        self.preserve_fail_count: int = 0
 
     def open(self) -> None:
         from .razer_devices import PREFERRED_PIDS, RAZER_VID as _VID
@@ -343,19 +345,62 @@ class SynapseGpuBackend:
 
     def preserve_cpu_boost(self, fn):
         """Run HID writes without letting Custom/fan mode drop EC CPU boost to low (~55W)."""
-        prev = None
-        try:
-            prev = self.get_cpu_boost()
-        except Exception:
-            prev = None
+        return self.preserve_ec_limits(fn)
+
+    def preserve_ec_limits(self, fn, *, cpu_boost=None, gpu_level=None):
+        """
+        Fan / Custom-mode HID writes often reset EC CPU→low (~55W) and may drop GPU tier.
+        Capture desired limits, run fn, then re-apply.
+
+        Prefer explicit cpu_boost / gpu_level (from active profile). Else use last known
+        *non-low* values when possible — never treat a fresh HID low read as the target
+        if we already have a stronger last-known pin.
+        """
+        self.last_preserve_error = ""
+        cpu = cpu_boost
+        gpu = gpu_level
+        if cpu is None:
+            cpu = self._last_cpu_boost
+            if cpu is None or int(cpu) <= int(CpuBoost.LOW):
+                try:
+                    got = self.get_cpu_boost()
+                    # Prefer last known over a low read (fan path may have already reset).
+                    if self._last_cpu_boost is not None and int(got) <= int(CpuBoost.LOW):
+                        cpu = self._last_cpu_boost
+                    else:
+                        cpu = got
+                except Exception:
+                    cpu = self._last_cpu_boost
+        else:
+            cpu = CpuBoost(int(cpu))
+        if gpu is None:
+            gpu = self._last_gpu_boost
+            if gpu is None:
+                try:
+                    gpu = self.get_gpu_boost()
+                except Exception:
+                    gpu = self._last_gpu_boost
+        else:
+            gpu = GpuLevel(int(gpu))
         try:
             return fn()
         finally:
-            if prev is not None:
+            errs: list[str] = []
+            if cpu is not None:
                 try:
-                    self.set_cpu_boost(prev)
-                except Exception:
-                    pass
+                    self.set_cpu_boost(cpu)
+                except Exception as exc:  # noqa: BLE001
+                    errs.append(f"CPU:{exc}")
+            if gpu is not None:
+                try:
+                    self.set_gpu_boost(gpu)
+                except Exception as exc:  # noqa: BLE001
+                    errs.append(f"GPU:{exc}")
+            if errs:
+                self.preserve_fail_count += 1
+                self.last_preserve_error = "; ".join(errs)[:160]
+            else:
+                self.last_preserve_error = ""
 
     def read_boost_state(self) -> str:
         """Best-effort EC CPU/GPU boost readout for diagnostics."""
@@ -487,24 +532,16 @@ class SynapseGpuBackend:
             cpu_boost = CpuBoost(int(cpu_boost))
 
         fan_msg = self.apply_fan(fan_mode, fan_rpm)
-        if fan_mode == "manual":
-            self.set_max_fan(False)
-            if touch_cpu_boost:
-                self.set_cpu_boost(cpu_boost)  # type: ignore[arg-type]
-            self.set_gpu_boost(level)
-            # set_fan_rpm chooses auto (0) vs manual (>0) per zone.
-            self.set_fan_rpm(int(fan_rpm))
-        else:
-            self.set_perf_mode_custom()
-            # CPU boost MUST be set when we own TDP — custom defaults to CPU low (~55W).
-            if touch_cpu_boost:
-                self.set_cpu_boost(cpu_boost)  # type: ignore[arg-type]
-            self.set_gpu_boost(level)
-            if fan_mode == "max":
-                self.set_max_fan(True)
+        # Fan / Custom HID writes reset EC tiers to low — re-pin AFTER fans.
+        if touch_cpu_boost:
+            self.set_cpu_boost(cpu_boost)  # type: ignore[arg-type]
+        self.set_gpu_boost(level)
+        if fan_mode == "max":
+            # Max-fan bit can be cleared by boost writes on some firmware.
+            self.set_max_fan(True)
         cpu_tag = (
             CPU_BOOST_NAMES.get(CpuBoost(int(cpu_boost)), str(cpu_boost))  # type: ignore[arg-type]
             if touch_cpu_boost
             else "keep"
         )
-        return f"{level_name.lower()}|cpu={cpu_tag}|fan={fan_msg}"
+        return f"gpu={level_name} cpu={cpu_tag} fan={fan_msg}"

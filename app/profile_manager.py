@@ -377,6 +377,7 @@ class ProfileManager:
 
                     self.synapse.set_perf_mode_custom()
                     if do_profile_fan:
+                        # Manual/auto/max fan HID can reset EC tiers — pin after.
                         self.synapse.apply_fan(profile.fan_mode, profile.fan_rpm)
                         parts.append(f"风扇={profile.fan_mode}")
                     else:
@@ -391,6 +392,12 @@ class ProfileManager:
                         self.synapse.set_gpu_boost(gpu_level)
                         note = "风扇由温度曲线接管" if curve_on else "仅 GPU"
                         parts.append(f"GPU={profile.gpu_level} ({note})")
+                    # Re-pin once more: some firmware drop tiers on the last fan bit.
+                    if do_profile_fan and str(profile.fan_mode).lower() == "manual":
+                        if do_cpu_lvl:
+                            self.synapse.set_cpu_boost(cpu_boost)
+                        if do_gpu and gpu_level is not None:
+                            self.synapse.set_gpu_boost(gpu_level)
                     return " | ".join(parts) if parts else "EC 无变更"
 
                 if do_cpu_lvl:
