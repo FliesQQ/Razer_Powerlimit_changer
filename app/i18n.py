@@ -182,6 +182,24 @@ STRINGS: dict[str, dict[str, str]] = {
         "zh": "也可在主托盘图标右键菜单中切换「托盘传感器（功耗/温度）」。",
         "en": "Also toggle via main tray icon context menu.",
     },
+    "tray_menu_profiles": {
+        "zh": "托盘右键菜单中的性能档",
+        "en": "Profiles in tray context menu",
+    },
+    "tray_menu_profiles_hint": {
+        "zh": "勾选后出现在托盘图标右键菜单；当前生效档会显示选中标记。未自定义时默认显示全部。",
+        "en": "Checked profiles appear in the tray menu; the active one is marked. Default: all profiles.",
+    },
+    "tray_menu_select_all": {"zh": "全选", "en": "Select all"},
+    "tray_menu_select_none": {"zh": "全不选", "en": "Select none"},
+    "tray_menu_saved": {
+        "zh": "托盘菜单性能档已更新",
+        "en": "Tray menu profiles updated",
+    },
+    "curve_keeps_control": {
+        "zh": "软件风扇曲线仍启用（档位风扇已跳过）",
+        "en": "Software fan curve still active (profile fans skipped)",
+    },
     "startup": {"zh": "启动选项", "en": "Startup"},
     "autostart": {
         "zh": "开机自动启动（登录后托盘静默运行，并自动应用上次性能档/降压）",
@@ -257,6 +275,22 @@ STRINGS: dict[str, dict[str, str]] = {
     "osd_updated_off": {"zh": "桌面 OSD 已更新（已关闭）", "en": "Desktop OSD updated (disabled)"},
     "force_no_cb": {"zh": "强制写入回调未连接", "en": "Force-write callback not wired"},
     "apply_profile": {"zh": "应用档位", "en": "Apply profile"},
+    "toast_switched": {
+        "zh": "已切换：{name}",
+        "en": "Switched: {name}",
+    },
+    "toast_restored": {
+        "zh": "已恢复默认",
+        "en": "Defaults restored",
+    },
+    "tray_tip_profile": {
+        "zh": "BladePower — 当前：{name}",
+        "en": "BladePower — Profile: {name}",
+    },
+    "tray_tip_none": {
+        "zh": "BladePower — 当前：未选择",
+        "en": "BladePower — No active profile",
+    },
     "live_ec_cpu": {"zh": "EC_CPU", "en": "EC_CPU"},
     "live_ec_gpu": {"zh": "EC_GPU", "en": "EC_GPU"},
     "live_cpu_pl": {"zh": "CPU PL", "en": "CPU PL"},
@@ -390,6 +424,10 @@ STRINGS: dict[str, dict[str, str]] = {
     "hotkey_fail": {
         "zh": "部分热键注册失败: {keys}",
         "en": "Some hotkeys failed: {keys}",
+    },
+    "hotkey_ready": {
+        "zh": "快捷键已就绪（{mode}，{n} 组）",
+        "en": "Hotkeys ready ({mode}, {n})",
     },
     "startup_applied": {"zh": "启动已应用: {msg}", "en": "Startup applied: {msg}"},
     "startup_uv": {"zh": "启动已重申降压: {msg}", "en": "Startup re-applied UV: {msg}"},

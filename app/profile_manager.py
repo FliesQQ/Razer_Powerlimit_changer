@@ -288,6 +288,13 @@ class ProfileManager:
             return False
         if self.safe_profile_id == profile_id and self.profiles:
             self.safe_profile_id = self.profiles[0].id
+        if "tray_menu_profile_ids" in (self.settings or {}):
+            known = {p.id for p in self.profiles}
+            self.settings["tray_menu_profile_ids"] = [
+                str(i)
+                for i in (self.settings.get("tray_menu_profile_ids") or [])
+                if str(i) in known
+            ]
         self.save()
         return True
 
@@ -568,6 +575,47 @@ class ProfileManager:
     def update_fan_curves(self, cfg) -> None:
         self.fan_curve_cfg = cfg
         self.save()
+
+    def tray_menu_profile_ids(self) -> list[str]:
+        """
+        Profile ids shown in the tray context menu.
+        Missing setting → all profiles (legacy default).
+        Explicit list → only those ids that still exist, preserved order.
+        """
+        raw = (self.settings or {}).get("tray_menu_profile_ids", None)
+        known = {p.id for p in self.profiles}
+        if raw is None:
+            return [p.id for p in self.profiles]
+        out: list[str] = []
+        for pid in list(raw or []):
+            s = str(pid)
+            if s in known and s not in out:
+                out.append(s)
+        return out
+
+    def set_tray_menu_profile_ids(self, ids: list[str]) -> None:
+        known = {p.id for p in self.profiles}
+        cleaned: list[str] = []
+        for pid in ids:
+            s = str(pid)
+            if s in known and s not in cleaned:
+                cleaned.append(s)
+        self.settings["tray_menu_profile_ids"] = cleaned
+        self.save()
+
+    def tray_menu_profiles(self) -> list["Profile"]:
+        by_id = {p.id: p for p in self.profiles}
+        return [by_id[i] for i in self.tray_menu_profile_ids() if i in by_id]
+
+    def prune_tray_menu_profile_ids(self) -> None:
+        """Drop deleted profile ids from tray menu setting if customized."""
+        if "tray_menu_profile_ids" not in (self.settings or {}):
+            return
+        before = list(self.settings.get("tray_menu_profile_ids") or [])
+        after = self.tray_menu_profile_ids()
+        if before != after:
+            self.settings["tray_menu_profile_ids"] = after
+            self.save()
 
     def refresh_xtu_path(self) -> dict:
         from .backends.xtu_detect import detect_and_record

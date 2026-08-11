@@ -44,7 +44,10 @@ class TrayService:
         *,
         on_show: Callable[[], None],
         on_quit: Callable[[], None],
-        profile_actions: list[tuple[str, Callable[[], None]]],
+        # (profile_id, display_name) in tray menu order.
+        get_tray_profiles: Callable[[], list[tuple[str, str]]],
+        on_select_profile: Callable[[str], None],
+        get_active_profile_id: Callable[[], Optional[str]],
         get_sensor_tray_visible: Optional[Callable[[], bool]] = None,
         on_toggle_sensor_tray: Optional[Callable[[], None]] = None,
         get_osd_visible: Optional[Callable[[], bool]] = None,
@@ -54,7 +57,9 @@ class TrayService:
     ) -> None:
         self.on_show = on_show
         self.on_quit = on_quit
-        self.profile_actions = profile_actions
+        self.get_tray_profiles = get_tray_profiles
+        self.on_select_profile = on_select_profile
+        self.get_active_profile_id = get_active_profile_id
         self.get_sensor_tray_visible = get_sensor_tray_visible
         self.on_toggle_sensor_tray = on_toggle_sensor_tray
         self.get_osd_visible = get_osd_visible
@@ -63,22 +68,53 @@ class TrayService:
         self.on_toggle_autostart = on_toggle_autostart
         self._icon = None
         self._thread: Optional[threading.Thread] = None
+        self._tooltip = "BladePower"
+        self._pystray = None
 
-    def start(self) -> bool:
+    def set_tooltip(self, text: str) -> None:
+        """Update mouse-hover tooltip (Windows: icon title)."""
+        tip = (text or "").strip() or "BladePower"
+        self._tooltip = tip
+        icon = self._icon
+        if icon is None:
+            return
         try:
-            import pystray
+            icon.title = tip
         except Exception:
-            return False
+            pass
 
-        image = _load_tray_image()
-
-        # default=True → Windows 下双击托盘图标触发「显示窗口」
+    def _build_menu(self):
+        assert self._pystray is not None
+        pystray = self._pystray
         menu_items = [
             pystray.MenuItem("显示窗口", _wrap(self.on_show), default=True)
         ]
-        for name, action in self.profile_actions:
-            # Bind action in default-arg so the loop does not capture the last one.
-            menu_items.append(pystray.MenuItem(name, _wrap(action)))
+
+        profiles = []
+        try:
+            profiles = list(self.get_tray_profiles() or [])
+        except Exception:
+            profiles = []
+
+        if profiles:
+            menu_items.append(pystray.Menu.SEPARATOR)
+
+        for pid, name in profiles:
+            # Bind pid in defaults so the loop does not capture the last id.
+            def _checked(_item=None, profile_id=pid):
+                try:
+                    return self.get_active_profile_id() == profile_id
+                except Exception:
+                    return False
+
+            menu_items.append(
+                pystray.MenuItem(
+                    name,
+                    _wrap(lambda profile_id=pid: self.on_select_profile(profile_id)),
+                    checked=_checked,
+                    radio=True,
+                )
+            )
 
         if self.on_toggle_sensor_tray is not None:
             def _checked_sensors(_item=None):
@@ -89,6 +125,7 @@ class TrayService:
                         return False
                 return False
 
+            menu_items.append(pystray.Menu.SEPARATOR)
             menu_items.append(
                 pystray.MenuItem(
                     "托盘传感器（功耗/温度）",
@@ -106,6 +143,8 @@ class TrayService:
                         return False
                 return False
 
+            if self.on_toggle_sensor_tray is None:
+                menu_items.append(pystray.Menu.SEPARATOR)
             menu_items.append(
                 pystray.MenuItem(
                     "桌面性能 OSD",
@@ -123,6 +162,8 @@ class TrayService:
                         return False
                 return False
 
+            if self.on_toggle_sensor_tray is None and self.on_toggle_osd is None:
+                menu_items.append(pystray.Menu.SEPARATOR)
             menu_items.append(
                 pystray.MenuItem(
                     "开机自动启动",
@@ -131,13 +172,36 @@ class TrayService:
                 )
             )
 
+        menu_items.append(pystray.Menu.SEPARATOR)
         menu_items.append(pystray.MenuItem("退出", _wrap(self.on_quit)))
+        return pystray.Menu(*menu_items)
 
+    def refresh_menu(self) -> None:
+        """Rebuild menu after tray-visible profile list changes."""
+        icon = self._icon
+        if icon is None or self._pystray is None:
+            return
+        try:
+            icon.menu = self._build_menu()
+            update = getattr(icon, "update_menu", None)
+            if callable(update):
+                update()
+        except Exception:
+            pass
+
+    def start(self) -> bool:
+        try:
+            import pystray
+        except Exception:
+            return False
+
+        self._pystray = pystray
+        image = _load_tray_image()
         self._icon = pystray.Icon(
             "BladePower",
             image,
-            "Blade Power Switcher",
-            menu=pystray.Menu(*menu_items),
+            self._tooltip,
+            menu=self._build_menu(),
         )
         self._thread = threading.Thread(target=self._icon.run, daemon=True)
         self._thread.start()

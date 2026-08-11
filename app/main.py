@@ -31,6 +31,7 @@ from app.hotkeys import HotkeyService
 from app.osd_overlay import OsdConfig, OsdSnapshot, PerformanceOsd
 from app.power_events import ResumeWatcher
 from app.profile_manager import ProfileManager
+from app.profile_toast import ProfileToast
 from app.sensor_tray import SensorSnapshot, SensorTrayService
 from app.tray import TrayService
 
@@ -157,6 +158,7 @@ def _main_run(args: argparse.Namespace) -> int:
     hotkeys = HotkeyService()
 
     root = tk.Tk()
+    hotkeys.bind_root(root)
     try:
         from app.window_icon import apply_window_icon
 
@@ -165,6 +167,34 @@ def _main_run(args: argparse.Namespace) -> int:
         root.after(200, lambda: apply_window_icon(root))
     except Exception:
         pass
+
+    profile_toast = ProfileToast(root)
+    _ui_feedback: dict = {"tray": None}
+
+    def notify_profile_change(*, show_toast: bool = False, restored: bool = False) -> None:
+        """Update tray hover tip; optionally show top-right switch toast."""
+        name = ""
+        try:
+            pid = manager.active_profile_id
+            p = manager.get(pid) if pid else None
+            name = p.name if p else ""
+        except Exception:
+            name = ""
+        tip = _t("tray_tip_profile", name=name) if name else _t("tray_tip_none")
+        tray_svc = _ui_feedback.get("tray")
+        if tray_svc is not None:
+            try:
+                tray_svc.set_tooltip(tip)
+            except Exception:
+                pass
+        if show_toast:
+            try:
+                if restored:
+                    profile_toast.show(_t("toast_restored"), subtitle=name)
+                else:
+                    profile_toast.show(_t("toast_switched", name=name or "-"))
+            except Exception:
+                pass
 
     _fan_cache = {
         "z1": None,
@@ -448,6 +478,8 @@ def _main_run(args: argparse.Namespace) -> int:
         root.after(2500, lambda: reapply_after_resume(reason="休眠唤醒重试", full=False))
         root.after(6000, lambda: reapply_after_resume(reason="休眠唤醒重试", full=False))
         root.after(12000, lambda: reapply_after_resume(reason="休眠唤醒重试", full=False))
+        # Win32 hotkeys usually survive; keyboard-lib hooks often die — refresh either way.
+        root.after(1500, register_hotkeys)
 
     def uv_watchdog() -> None:
         """若目标降压非零但读回接近 0，则补写（捕获漏报的唤醒）。"""
@@ -474,6 +506,8 @@ def _main_run(args: argparse.Namespace) -> int:
     resume_watcher.start()
     root.after(8000, uv_watchdog)
 
+    _hk_retry = {"n": 0}
+
     def register_hotkeys() -> None:
         mapping = {}
         for hk, pid in manager.hotkey_map().items():
@@ -484,35 +518,87 @@ def _main_run(args: argparse.Namespace) -> int:
             mapping[hk] = make_cb(pid)
         mapping["ctrl+alt+0"] = lambda: on_hotkey_restore()
         failed = hotkeys.register_map(mapping)
+        if failed and len(failed) >= len(mapping) and _hk_retry["n"] < 6:
+            _hk_retry["n"] += 1
+            root.after(400, register_hotkeys)
+            return
+        _hk_retry["n"] = 0
         if failed:
             gui._set_status(_t("hotkey_fail", keys=", ".join(failed)))
+        else:
+            mode = getattr(hotkeys, "mode", "") or ""
+            if mode:
+                gui._set_status(_t("hotkey_ready", mode=mode, n=len(mapping)))
 
     def on_hotkey_profile(profile_id: str) -> None:
-        def work():
-            result = manager.apply_by_id(profile_id)
-            root.after(0, lambda: (gui.refresh_list(), gui._set_status(" | ".join(result.messages)[:180])))
+        def work() -> None:
+            try:
+                result = manager.apply_by_id(profile_id)
+                if fan_ctrl is not None and getattr(
+                    manager.fan_curve_cfg, "enabled", False
+                ):
+                    try:
+                        fan_ctrl.force_tick()
+                        result.messages.append(_t("curve_keeps_control"))
+                    except Exception:
+                        pass
+                msgs = list(getattr(result, "messages", None) or [])
+            except Exception as exc:  # noqa: BLE001
+                msgs = [f"热键切档失败: {exc}"]
+
+            def done() -> None:
+                try:
+                    gui.refresh_list()
+                    gui._set_status(" | ".join(msgs)[:180])
+                    notify_profile_change(show_toast=True)
+                except Exception:
+                    pass
+
+            try:
+                root.after(0, done)
+            except Exception:
+                pass
 
         import threading
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, daemon=True, name="HotkeyApply").start()
 
     def on_hotkey_restore() -> None:
-        def work():
-            result = manager.restore_defaults()
+        def work() -> None:
+            try:
+                result = manager.restore_defaults()
+                if fan_ctrl is not None and getattr(
+                    manager.fan_curve_cfg, "enabled", False
+                ):
+                    try:
+                        fan_ctrl.force_tick()
+                        result.messages.append(_t("curve_keeps_control"))
+                    except Exception:
+                        pass
+                msgs = list(getattr(result, "messages", None) or [])
+            except Exception as exc:  # noqa: BLE001
+                msgs = [f"热键恢复失败: {exc}"]
 
-            def done():
-                gui.uv_core.set("0")
-                gui.uv_cache.set("0")
-                gui.uv_ecache.set("0")
-                manager.update_undervolt(0, 0, 0)
-                gui.refresh_list()
-                gui._set_status(" | ".join(result.messages)[:180])
+            def done() -> None:
+                try:
+                    gui.uv_core.set("0")
+                    gui.uv_cache.set("0")
+                    gui.uv_ecache.set("0")
+                    manager.update_undervolt(0, 0, 0)
+                    gui.refresh_list()
+                    gui._set_status(" | ".join(msgs)[:180])
+                    notify_profile_change(show_toast=True, restored=True)
+                except Exception:
+                    pass
 
-            root.after(0, done)
+            try:
+                root.after(0, done)
+            except Exception:
+                pass
 
         import threading
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, daemon=True, name="HotkeyRestore").start()
 
     def on_fan_curves_changed() -> None:
         """Software curve ↔ profile fan mode are mutually exclusive."""
@@ -710,9 +796,9 @@ def _main_run(args: argparse.Namespace) -> int:
     auto_bright.start()
 
     register_hotkeys()
+    # HWND / WndProc may not be ready on first pass — one delayed refresh.
+    root.after(600, register_hotkeys)
     root.after(5000, reassert_pl)
-
-    tray_actions = [(p.name, lambda pid=p.id: on_hotkey_profile(pid)) for p in manager.profiles]
 
     def show_window() -> None:
         root.after(0, root.deiconify)
@@ -738,7 +824,11 @@ def _main_run(args: argparse.Namespace) -> int:
         except Exception:
             pass
         try:
-            hotkeys.clear()
+            profile_toast.destroy()
+        except Exception:
+            pass
+        try:
+            hotkeys.shutdown()
         except Exception:
             pass
         try:
@@ -801,10 +891,15 @@ def _main_run(args: argparse.Namespace) -> int:
 
     from app import autostart as autostart_mod
 
+    def get_tray_profiles() -> list[tuple[str, str]]:
+        return [(p.id, p.name) for p in manager.tray_menu_profiles()]
+
     tray = TrayService(
         on_show=show_window,
         on_quit=quit_app,
-        profile_actions=tray_actions,
+        get_tray_profiles=get_tray_profiles,
+        on_select_profile=on_hotkey_profile,
+        get_active_profile_id=lambda: manager.active_profile_id,
         get_sensor_tray_visible=lambda: bool(
             (manager.settings or {}).get("sensor_tray_enabled", True)
         ),
@@ -817,6 +912,27 @@ def _main_run(args: argparse.Namespace) -> int:
         on_toggle_autostart=lambda: set_autostart(not autostart_mod.is_enabled()),
     )
     tray.start()
+    _ui_feedback["tray"] = tray
+    notify_profile_change(show_toast=False)
+
+    def on_profile_applied_from_gui() -> None:
+        # GUI apply path: re-assert software curve if it owns fans.
+        if fan_ctrl is not None and getattr(manager.fan_curve_cfg, "enabled", False):
+            def _curve():
+                try:
+                    fan_ctrl.force_tick()
+                except Exception:
+                    pass
+                root.after(0, lambda: notify_profile_change(show_toast=False))
+
+            import threading
+
+            threading.Thread(target=_curve, daemon=True, name="CurveAfterApply").start()
+        else:
+            notify_profile_change(show_toast=False)
+
+    gui.on_profile_applied = on_profile_applied_from_gui
+    gui.on_tray_menu_profiles_changed = tray.refresh_menu
 
     def sensor_poll() -> SensorSnapshot:
         cpu_p = None

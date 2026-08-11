@@ -105,8 +105,11 @@ class AppGUI:
         )
         self.on_features_changed: Optional[Callable[[], None]] = None
         self.on_auto_bright_changed: Optional[Callable[[], None]] = None
+        self.on_profile_applied: Optional[Callable[[], None]] = None
+        self.on_tray_menu_profiles_changed: Optional[Callable[[], None]] = None
         self._auto_bright_ctrl = None
         self._ab_save_timer = None
+        self._tray_profile_vars: dict[str, tk.BooleanVar] = {}
 
         ab0 = AutoBrightConfig.from_dict(settings.get("auto_bright"))
         self.ab_enabled = tk.BooleanVar(value=bool(ab0.enabled))
@@ -539,6 +542,31 @@ class AppGUI:
             tab_tray, text=t("tray_sensors_hint"), wraplength=640
         )
         self._lbl_tray_hint.pack(anchor=tk.W, pady=(8, 0))
+
+        ttk.Separator(tab_tray).pack(fill=tk.X, pady=12)
+        self._lbl_tray_menu_profiles = ttk.Label(
+            tab_tray, text=t("tray_menu_profiles"), font=("Segoe UI", 10, "bold")
+        )
+        self._lbl_tray_menu_profiles.pack(anchor=tk.W)
+        self._lbl_tray_menu_hint = ttk.Label(
+            tab_tray, text=t("tray_menu_profiles_hint"), wraplength=640
+        )
+        self._lbl_tray_menu_hint.pack(anchor=tk.W, pady=(4, 6))
+        tray_btns = ttk.Frame(tab_tray)
+        tray_btns.pack(anchor=tk.W, fill=tk.X)
+        self._btn_tray_all = ttk.Button(
+            tray_btns, text=t("tray_menu_select_all"), command=self._tray_menu_select_all
+        )
+        self._btn_tray_all.pack(side=tk.LEFT, padx=(0, 6))
+        self._btn_tray_none = ttk.Button(
+            tray_btns,
+            text=t("tray_menu_select_none"),
+            command=self._tray_menu_select_none,
+        )
+        self._btn_tray_none.pack(side=tk.LEFT)
+        self._tray_profiles_frame = ttk.Frame(tab_tray)
+        self._tray_profiles_frame.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+        self._rebuild_tray_profile_checks()
 
         ttk.Separator(tab_tray).pack(fill=tk.X, pady=12)
         self._lbl_startup = ttk.Label(
@@ -1096,6 +1124,10 @@ class AppGUI:
             ("_lbl_tray_desc", "tray_sensors_desc"),
             ("_chk_sensor_tray", "tray_sensors_enable"),
             ("_lbl_tray_hint", "tray_sensors_hint"),
+            ("_lbl_tray_menu_profiles", "tray_menu_profiles"),
+            ("_lbl_tray_menu_hint", "tray_menu_profiles_hint"),
+            ("_btn_tray_all", "tray_menu_select_all"),
+            ("_btn_tray_none", "tray_menu_select_none"),
             ("_lbl_startup", "startup"),
             ("_chk_autostart", "autostart"),
             ("_lbl_autostart_hint", "autostart_hint"),
@@ -1348,6 +1380,58 @@ class AppGUI:
         else:
             self.xtu_var.set(t("xtu_missing"))
 
+    def _rebuild_tray_profile_checks(self) -> None:
+        frame = getattr(self, "_tray_profiles_frame", None)
+        if frame is None:
+            return
+        for child in frame.winfo_children():
+            try:
+                child.destroy()
+            except Exception:
+                pass
+        selected = set(self.manager.tray_menu_profile_ids())
+        # If setting was never customized, treat as all selected in UI.
+        customized = "tray_menu_profile_ids" in (self.manager.settings or {})
+        self._tray_profile_vars = {}
+        for p in self.manager.profiles:
+            on = (p.id in selected) if customized else True
+            var = tk.BooleanVar(value=on)
+            self._tray_profile_vars[p.id] = var
+            ttk.Checkbutton(
+                frame,
+                text=p.name,
+                variable=var,
+                command=self._on_tray_menu_profiles_toggle,
+            ).pack(anchor=tk.W, pady=1)
+
+    def _on_tray_menu_profiles_toggle(self) -> None:
+        ids = [
+            pid
+            for pid, var in self._tray_profile_vars.items()
+            if bool(var.get())
+        ]
+        # Preserve profile list order.
+        order = {p.id: i for i, p in enumerate(self.manager.profiles)}
+        ids.sort(key=lambda x: order.get(x, 9999))
+        self.manager.set_tray_menu_profile_ids(ids)
+        self._set_status(t("tray_menu_saved"))
+        cb = getattr(self, "on_tray_menu_profiles_changed", None)
+        if cb:
+            try:
+                cb()
+            except Exception:
+                pass
+
+    def _tray_menu_select_all(self) -> None:
+        for var in self._tray_profile_vars.values():
+            var.set(True)
+        self._on_tray_menu_profiles_toggle()
+
+    def _tray_menu_select_none(self) -> None:
+        for var in self._tray_profile_vars.values():
+            var.set(False)
+        self._on_tray_menu_profiles_toggle()
+
     def _on_sensor_tray_toggle(self) -> None:
         enabled = bool(self.sensor_tray_var.get())
         if self.on_sensor_tray_changed:
@@ -1408,6 +1492,13 @@ class AppGUI:
                 + (f":{p.fan_rpm}" if getattr(p, "fan_mode", "") == "manual" else "")
                 + f"{hk}{mark}",
             )
+        try:
+            sig = tuple((p.id, p.name) for p in self.manager.profiles)
+            if sig != getattr(self, "_tray_profiles_sig", None):
+                self._tray_profiles_sig = sig
+                self._rebuild_tray_profile_checks()
+        except Exception:
+            pass
 
     def _selected_profile(self) -> Optional["Profile"]:
         sel = self.listbox.curselection()
@@ -1507,6 +1598,12 @@ class AppGUI:
         self._busy = False
         self.refresh_list()
         self._show_result(t("apply_profile"), result.messages, result.ok)
+        cb = getattr(self, "on_profile_applied", None)
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
 
     def apply_selected(self) -> None:
         p = self._selected_profile()
